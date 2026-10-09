@@ -291,7 +291,8 @@ class WindowTest(LauncherTest):
         self.assertEqual(window.url, anna.app.url)
         self.assertEqual(window.profile, os.path.join(anna.app.data_dir, "window"))
         self.assertEqual(system.browsed, [])
-        self.assertEqual(flsync.read_instance(anna.app.data_dir)["window"], window.pid)
+        self.wait_for(lambda: flsync.read_instance(anna.app.data_dir).get("window") == window.pid,
+                      why="launcher.json fick aldrig fönstrets process")  # written once the window is there
         self.has_been_open(anna)
         window.code = 0  # the user closes the window
         running.result(15)
