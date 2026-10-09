@@ -1,0 +1,3 @@
+# Valfritt: autocomplete och dokumentation för FL:s script-API i VS Code m.fl.
+# Relay, monitor och tester behöver inga paket utöver Python 3.10+.
+fl-studio-api-stubs

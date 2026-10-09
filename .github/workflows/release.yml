@@ -1,0 +1,56 @@
+name: Release
+
+# A tag vX.Y.Z (matching app/version.py) builds FLSync.exe and FLSync.zip on
+# Windows, runs the tests, and publishes a release with the zip. The newest
+# release's zip is always at
+#   https://github.com/<owner>/<repo>/releases/latest/download/FLSync.zip
+#
+#   git tag v0.9.0
+#   git push origin v0.9.0
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Taggen och app/version.py säger samma version
+        shell: pwsh
+        run: |
+          $version = python -c "import sys; sys.path.insert(0, 'app'); import version; print(version.VERSION)"
+          if ("v$version" -ne "${{ github.ref_name }}") { throw "Taggen ${{ github.ref_name }} men app/version.py säger $version" }
+      - name: Bygg FLSync.exe
+        run: python scripts/build_exe.py
+      - name: Kör testerna
+        run: python -m unittest discover -s tests
+      - name: Packa FLSync.zip
+        run: python scripts/make_zip.py
+      - name: Release-text ur CHANGELOG.md
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          $lines = Get-Content CHANGELOG.md -Encoding utf8
+          $start = ($lines | Select-String -Pattern "^## $([regex]::Escape($version))\b" | Select-Object -First 1).LineNumber
+          if (-not $start) { throw "CHANGELOG.md har inget avsnitt för $version" }
+          $notes = @()
+          foreach ($line in $lines[$start..($lines.Count - 1)]) { if ($line -match "^## ") { break }; $notes += $line }
+          $notes += ""
+          $notes += "**Ladda ner:** FLSync.zip nedan. Packa upp den (högerklicka > Extrahera alla) och dubbelklicka på FLSync.exe."
+          Set-Content -Path release-notes.md -Value $notes -Encoding utf8
+      - name: Publicera releasen
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          gh release create "${{ github.ref_name }}" dist/FLSync.zip --title "FLSync $version" --notes-file release-notes.md

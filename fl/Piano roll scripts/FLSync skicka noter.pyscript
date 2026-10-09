@@ -1,0 +1,58 @@
+"""FLSync: send the notes in this piano roll to the others in the session.
+
+Run it from the piano roll: Tools > Scripts > FLSync skicka noter (Ctrl+Alt+Y
+runs the last script again). The FLSync bridge (bridge.py) passes the notes on:
+piano roll scripts can't reach the network or the FLSync MIDI script, but they
+may write files. See docs/protocol_v2.md, "Notes".
+"""
+from flpianoroll import *
+import json
+import os
+import time
+
+STALE = 30.0  # the bridge refreshes context.json every few seconds while it runs
+
+
+def folder():
+    base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Local")
+    return os.path.join(base, "FLSync", "notes")
+
+
+def read_context():
+    """What the bridge says the piano roll shows, or None if the bridge isn't running."""
+    try:
+        with open(os.path.join(folder(), "context.json"), encoding="utf-8") as f:
+            context = json.load(f)
+    except (OSError, ValueError):
+        return None
+    stamp = context.get("time") if isinstance(context, dict) else None
+    if not isinstance(stamp, (int, float)) or not time.time() - stamp <= STALE:  # not: NaN is never fresh
+        return None
+    return context
+
+
+def note_row(note):
+    return [note.time, note.length, note.number, round(note.velocity, 4), round(note.pan, 4),
+            round(note.release, 4), note.color, round(note.fcut, 4), round(note.fres, 4), note.pitchofs,
+            int(note.slide), int(note.porta), int(note.muted), note.repeats]
+
+
+def main():
+    context = read_context()
+    if context is None or context.get("pattern") is None or context.get("channel") is None:
+        Utils.ShowMessage("FLSync: bryggan (bridge.py) är inte igång, så noterna kan inte skickas.")
+        return
+    out = {"pattern": context["pattern"], "channel": context["channel"], "name": context.get("name"),
+           "ppq": score.PPQ, "notes": [note_row(score.getNote(i)) for i in range(score.noteCount)],
+           "time": time.time()}
+    path = os.path.join(folder(), "outbox.json")
+    try:
+        with open(path + ".tmp", "w", encoding="utf-8") as f:
+            json.dump(out, f)
+        os.replace(path + ".tmp", path)  # the bridge never sees half a file
+    except OSError:
+        with open(path, "w", encoding="utf-8") as f:  # (the bridge also skips files it can't parse yet)
+            json.dump(out, f)
+
+
+main()

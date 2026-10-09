@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Built here (scripts/build_exe.py, scripts/make_zip.py) and by the release workflow
+/FLSync.exe
+dist/
+
+# Editors and logs
+.vscode/
+.idea/
+*.log

@@ -1,0 +1,83 @@
+"""FLSync: replace the notes in this piano roll with the session's.
+
+Run it from the piano roll: Tools > Scripts > FLSync hämta noter (Ctrl+Alt+Y
+runs the last script again). The notes are the ones someone sent for this
+pattern and channel with "FLSync skicka noter"; the FLSync bridge (bridge.py)
+keeps them in a file for this script. See docs/protocol_v2.md, "Notes".
+"""
+from flpianoroll import *
+import json
+import os
+import time
+
+STALE = 30.0  # the bridge refreshes context.json every few seconds while it runs
+
+
+def folder():
+    base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Local")
+    return os.path.join(base, "FLSync", "notes")
+
+
+def read_context():
+    """What the bridge says the piano roll shows, or None if the bridge isn't running."""
+    try:
+        with open(os.path.join(folder(), "context.json"), encoding="utf-8") as f:
+            context = json.load(f)
+    except (OSError, ValueError):
+        return None
+    stamp = context.get("time") if isinstance(context, dict) else None
+    if not isinstance(stamp, (int, float)) or not time.time() - stamp <= STALE:  # not: NaN is never fresh
+        return None
+    return context
+
+
+def clamp(value, low, high):
+    return min(high, max(low, value))
+
+
+def make_note(row, scale):
+    """A Note from one row of someone else's notes, every field kept in FL's range."""
+    (start, length, number, velocity, pan, release, color, fcut, fres, pitchofs, slide, porta, muted,
+     repeats) = row
+    note = Note()
+    note.time = clamp(int(round(start * scale)), 0, 2 ** 31 - 1)
+    note.length = clamp(int(round(length * scale)), 1, 2 ** 31 - 1)
+    note.number = clamp(int(number), 0, 131)
+    note.velocity = clamp(float(velocity), 0.0, 1.0)
+    note.pan = clamp(float(pan), 0.0, 1.0)
+    note.release = clamp(float(release), 0.0, 1.0)
+    note.color = clamp(int(color), 0, 15)
+    note.fcut = clamp(float(fcut), 0.0, 1.0)
+    note.fres = clamp(float(fres), 0.0, 1.0)
+    note.pitchofs = clamp(int(pitchofs), -120, 120)
+    note.slide = bool(slide)
+    note.porta = bool(porta)
+    note.muted = bool(muted)
+    note.repeats = clamp(int(repeats), 0, 14)
+    return note
+
+
+def main():
+    context = read_context()
+    if context is None:
+        Utils.ShowMessage("FLSync: bryggan (bridge.py) är inte igång, så det finns inga noter att hämta.")
+        return
+    session = context.get("session")
+    if not session:
+        Utils.ShowMessage("FLSync: ingen har skickat noter till %s i mönster %s än."
+                          % (context.get("name") or "den här kanalen", context.get("pattern")))
+        return
+    by = session.get("by") if isinstance(session, dict) else None
+    try:
+        scale = score.PPQ / float(session.get("ppq") or score.PPQ)  # their timebase to ours
+        notes = [make_note(row, scale) for row in session.get("notes") or []]
+    except (AttributeError, TypeError, ValueError, OverflowError, ZeroDivisionError):
+        Utils.ShowMessage("FLSync: noterna från %s gick inte att läsa." % (by or "någon"))
+        return
+    score.clearNotes(True)
+    for note in notes:
+        score.addNote(note)
+    Utils.log("FLSync: hämtade %d noter från %s" % (len(notes), session.get("by")))
+
+
+main()

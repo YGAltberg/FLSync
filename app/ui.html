@@ -1,0 +1,633 @@
+<!doctype html>
+<html lang="sv" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="google" content="notranslate">
+<title>FLSync</title>
+<style>
+:root {
+  --bg: #f4f5f7; --card: #ffffff; --text: #1c1f24; --muted: #5d6470; --line: #dde0e5;
+  --accent: #e8730c; --accent-text: #ffffff; --accent-soft: #fdf0e3;
+  --ok: #1d8a4a; --bad: #c62f2f; --wait: #b7791f; --off: #8a909a;
+  --bad-soft: #fbeaea; --wait-soft: #fdf5e6; --ok-soft: #e8f5ed;
+  --mono: Consolas, "Cascadia Mono", "Courier New", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15171b; --card: #1e2127; --text: #e8eaed; --muted: #a0a6b0; --line: #30343c;
+    --accent: #f28a2e; --accent-text: #15171b; --accent-soft: #3a2a1b;
+    --ok: #4cc27c; --bad: #f06b6b; --wait: #e0a646; --off: #7d838d;
+    --bad-soft: #3a2224; --wait-soft: #392f1d; --ok-soft: #1d3326;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+       font: 15px/1.5 "Segoe UI", system-ui, -apple-system, sans-serif; }
+header { background: var(--card); border-bottom: 1px solid var(--line); }
+.bar { max-width: 880px; margin: 0 auto; padding: 14px 16px; display: flex; gap: 14px; align-items: center;
+       flex-wrap: wrap; }
+.brand { font-size: 20px; font-weight: 700; letter-spacing: .3px; }
+.brand span { color: var(--accent); }
+.pill { padding: 3px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; background: var(--line); }
+.pill.ok { background: var(--ok-soft); color: var(--ok); }
+.pill.wait { background: var(--wait-soft); color: var(--wait); }
+.pill.bad { background: var(--bad-soft); color: var(--bad); }
+.me { margin-left: auto; display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 14px; }
+.me input { width: 160px; }
+main { max-width: 880px; margin: 0 auto; padding: 16px; display: grid; gap: 16px; }
+section, .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+h2 { font-size: 16px; margin: 0 0 10px; }
+h3 { font-size: 15px; margin: 0 0 6px; }
+p { margin: 6px 0; }
+.muted { color: var(--muted); }
+.small { font-size: 13px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 680px) { .grid2 { grid-template-columns: 1fr; } .me { margin-left: 0; } }
+button { font: inherit; font-weight: 600; border: 1px solid var(--line); background: var(--card); color: var(--text);
+         padding: 7px 14px; border-radius: 7px; cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--muted); }
+button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+button.danger { color: var(--bad); }
+button:disabled { opacity: .5; cursor: default; }
+button.link { border: none; background: none; padding: 0; color: var(--muted); text-decoration: underline;
+              font-weight: 400; }
+input, textarea { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line);
+                  border-radius: 7px; padding: 6px 9px; }
+textarea { width: 100%; min-height: 64px; resize: vertical; font-family: var(--mono); }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+.code { font-family: var(--mono); font-size: 22px; font-weight: 700; letter-spacing: 1.5px; word-break: break-all;
+        background: var(--accent-soft); border-radius: 8px; padding: 10px 14px; user-select: all; }
+.banner { border-radius: 10px; padding: 12px 16px; border: 1px solid; }
+.banner.bad { background: var(--bad-soft); border-color: var(--bad); }
+.banner.wait { background: var(--wait-soft); border-color: var(--wait); }
+.banner.ok { background: var(--ok-soft); border-color: var(--ok); }
+.banner h3 { margin: 0 0 4px; }
+.banner .close { float: right; }
+ul.checks { list-style: none; margin: 0; padding: 0; }
+ul.checks > li { display: grid; grid-template-columns: 22px 1fr; gap: 6px; padding: 6px 0;
+                 border-top: 1px solid var(--line); }
+ul.checks > li:first-child { border-top: none; }
+.icon { font-weight: 700; text-align: center; }
+.icon.ok { color: var(--ok); } .icon.bad { color: var(--bad); } .icon.wait { color: var(--wait); }
+.icon.off { color: var(--off); }
+ol.fix, ul.fix { margin: 4px 0 0; padding-left: 20px; font-size: 14px; }
+.people { list-style: none; margin: 0; padding: 0; }
+.people li { padding: 5px 0; border-top: 1px solid var(--line); display: flex; gap: 8px; flex-wrap: wrap; }
+.people li:first-child { border-top: none; }
+.tag { font-size: 12px; padding: 1px 8px; border-radius: 999px; background: var(--line); color: var(--muted); }
+.tag.accent { background: var(--accent-soft); color: var(--accent); }
+.warn { color: var(--bad); }
+pre.log { font-family: var(--mono); font-size: 12.5px; max-height: 320px; overflow: auto; margin: 8px 0 0;
+          white-space: pre-wrap; word-break: break-word; background: var(--bg); border-radius: 8px; padding: 8px 10px; }
+details summary { cursor: pointer; font-weight: 600; }
+.footer { display: flex; gap: 10px; flex-wrap: wrap; justify-content: space-between; }
+body.installing main > *:not(#setup):not(#gone) { display: none !important; }
+body:not(.installing) #setup, body.installing .me { display: none !important; }
+#setup ul.what { margin: 6px 0 0; padding-left: 20px; }
+#setup ul.what li { margin: 2px 0; }
+#setup pre.log { max-height: 360px; }
+[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <div class="brand">FL<span>Sync</span> <small id="app-version" class="muted small"></small></div>
+    <div id="pill" class="pill">Startar ...</div>
+    <div class="me">
+      <label for="name">Ditt namn</label>
+      <input id="name" maxlength="40" autocomplete="off">
+      <button id="save-name" hidden>Spara</button>
+    </div>
+  </div>
+</header>
+<main>
+  <div id="gone" class="banner bad" hidden>
+    <h3 id="gone-title">FLSync är inte igång</h3>
+    <p id="gone-text">Starta FLSync igen: dubbelklicka på FLSync.</p>
+  </div>
+
+  <section id="setup" hidden>
+    <h2 id="setup-title">Installera FLSync</h2>
+    <div id="setup-intro" hidden>
+      <p id="setup-intro-text"></p>
+      <ul class="what" id="setup-what">
+        <li><strong>loopMIDI</strong>, den virtuella MIDI-kabeln mellan FL Studio och FLSync, om den saknas
+          (Windows frågar om lov)</li>
+        <li><strong>FLSync-scriptet</strong> i FL Studio, och två script för noter i pianorullen</li>
+        <li><strong>FL Studios MIDI-inställningar</strong>, för alla FL-versioner på datorn</li>
+        <li>genvägen <strong>FLSync</strong> på skrivbordet och i Start-menyn</li>
+      </ul>
+      <p id="setup-fl" class="warn" hidden>FL Studio är igång. Spara ditt projekt och stäng FL Studio: installationen
+        väntar på det (FL skriver sina inställningar när det stängs).</p>
+      <p id="setup-dry" class="muted small" hidden>Provkörning: ingenting ändras.</p>
+      <div class="row">
+        <button class="primary" id="setup-begin">Installera</button>
+        <button id="setup-skip" hidden>Starta FLSync</button>
+      </div>
+    </div>
+    <div id="setup-question" class="banner wait" hidden>
+      <p id="setup-question-text"></p>
+      <div class="row"><button id="setup-yes">Ja</button><button id="setup-no">Nej</button></div>
+    </div>
+    <p id="setup-busy" class="muted" hidden></p>
+    <div id="setup-done" hidden>
+      <div id="setup-result" class="banner"><h3 id="setup-result-title"></h3><p id="setup-result-text"></p></div>
+      <div id="setup-problems" hidden><h3>Det här gick inte</h3><ul class="fix" id="setup-problem-list"></ul></div>
+      <div id="setup-todo" hidden><h3>Kvar att göra</h3><ul class="fix" id="setup-todo-list"></ul></div>
+      <div class="row">
+        <button class="primary" id="setup-launch">Starta FLSync</button>
+        <button id="setup-close">Stäng</button>
+      </div>
+    </div>
+    <div class="row" id="setup-cancel-row" hidden><button id="setup-cancel">Avbryt</button></div>
+    <details id="setup-log-box" style="margin-top:10px">
+      <summary class="muted small">Vad som görs</summary>
+      <pre class="log" id="setup-log"></pre>
+    </details>
+  </section>
+  <div id="error" class="banner bad" hidden>
+    <button class="link close" id="error-close">Stäng</button>
+    <h3 id="error-title"></h3>
+    <p id="error-text"></p>
+    <ul class="fix" id="error-fix"></ul>
+  </div>
+  <div id="open-warning" class="banner wait" hidden>
+    <h3 id="open-warning-title"></h3>
+    <p id="open-warning-text"></p>
+  </div>
+
+  <div id="start" class="grid2" hidden>
+    <div class="card">
+      <h2>Starta session</h2>
+      <p class="muted">Du blir värd. FLSync gör en inbjudan som du skickar till de andra.</p>
+      <div class="row"><button class="primary" id="host">Starta session</button></div>
+      <details class="small" style="margin-top:12px">
+        <summary class="muted">Avancerat</summary>
+        <div class="row"><label for="port">Port</label><input id="port" type="number" min="1" max="65535" style="width:110px"></div>
+      </details>
+    </div>
+    <div class="card">
+      <h2>Gå med</h2>
+      <p class="muted">Klistra in inbjudan du har fått (den börjar med FLS1-).</p>
+      <textarea id="code" spellcheck="false" autocomplete="off" placeholder="FLS1-...."></textarea>
+      <div class="row"><button class="primary" id="join">Gå med</button></div>
+    </div>
+  </div>
+  <div id="busy" class="banner wait" hidden><h3 id="busy-text"></h3></div>
+  <div id="resuming" class="banner wait" hidden>
+    <p id="resuming-text"></p>
+    <div class="row"><button id="stop-resuming">Sluta försöka</button></div>
+  </div>
+
+  <section id="hosting" hidden>
+    <h2>Inbjudan</h2>
+    <div id="invite-wait" class="muted">Förbereder inbjudan ...</div>
+    <div id="invite-ready" hidden>
+      <div class="code" id="invite"></div>
+      <div class="row">
+        <button class="primary" id="copy">Kopiera inbjudan</button>
+        <span id="copied" class="muted small" hidden>Kopierad!</span>
+        <button class="link small" id="new-code">Gör en ny kod</button>
+      </div>
+      <p class="muted small">Skicka koden till de andra (t.ex. i en chatt). De väljer Gå med och klistrar in den.</p>
+      <p class="small" id="addresses"></p>
+      <p class="small warn" id="invite-note" hidden></p>
+      <p class="muted small">Frågar Windows om brandväggen för Python: välj Tillåt, annars når de andra dig inte.</p>
+    </div>
+    <div id="router" class="small" style="margin-top:8px"></div>
+  </section>
+
+  <section id="joined" hidden>
+    <h2>Session</h2>
+    <p id="joined-text"></p>
+  </section>
+
+  <section>
+    <h2>Status</h2>
+    <ul class="checks" id="checks"></ul>
+  </section>
+
+  <section id="people-box" hidden>
+    <h2>Deltagare</h2>
+    <ul class="people" id="people"></ul>
+    <p id="people-note" class="small warn" hidden></p>
+    <p id="pen" class="small" hidden></p>
+    <div id="sync-box" hidden>
+      <p id="sync" class="small warn"></p>
+      <div class="row"><button id="share-mine" hidden>Dela mitt projekt</button></div>
+    </div>
+  </section>
+
+  <section id="version-box" hidden>
+    <h2>Senaste versionen av projektet</h2>
+    <p class="small"><strong>Spara i FL (Ctrl+S) för att synka projektet:</strong> dina ändringar går till de andra och
+      du får deras. Har ni ändrat samtidigt slås versionerna ihop. Rattar, steg och plugin-inställningar synkas direkt.</p>
+    <p id="saved" class="small" hidden></p>
+    <p id="version-title"></p>
+    <p id="version-details" class="muted small"></p>
+    <p id="version-newer" class="warn small" hidden></p>
+    <div id="version-missing" class="small" hidden></div>
+    <p id="version-state" class="small"></p>
+    <div class="row">
+      <button class="primary" id="open">Öppna senaste versionen</button>
+      <button id="open-folder">Visa i mappen</button>
+    </div>
+  </section>
+
+  <section id="notes-box" hidden>
+    <h2>Noter</h2>
+    <ul class="people" id="notes"></ul>
+    <p class="muted small">Hämta noter: öppna pianorullen för kanalen och kör Tools &gt; Scripts &gt; FLSync hämta noter.</p>
+  </section>
+
+  <section>
+    <details id="log-box">
+      <summary>Logg</summary>
+      <pre class="log" id="log"></pre>
+    </details>
+  </section>
+
+  <div class="footer">
+    <button class="danger" id="leave" hidden>Lämna sessionen</button>
+    <button id="quit">Avsluta FLSync</button>
+  </div>
+</main>
+<script nonce="__NONCE__">
+"use strict";
+const params = new URLSearchParams(location.search);
+const token = params.get("t") || location.hash.slice(1);
+let state = null, filledCode = false, filledPort = false, hiddenError = null;
+
+const $ = (id) => document.getElementById(id);
+
+async function api(path, body) {
+  const options = { headers: { "X-FLSync-Token": token }, cache: "no-store" };
+  if (body !== undefined) {
+    options.method = "POST";
+    options.headers["Content-Type"] = "application/json";
+    options.body = JSON.stringify(body);
+  }
+  const answer = await fetch("/api/" + path, options);
+  if (answer.status === 403) throw new Error("forbidden");  // a page from an earlier run of FLSync
+  return answer.json();
+}
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined && text !== null) node.textContent = text;
+  return node;
+}
+
+function show(id, visible) { $(id).hidden = !visible; }
+
+function goneBecause(error) {
+  const old = error && error.message === "forbidden";
+  $("gone-title").textContent = old ? "Det här fönstret hör till en äldre start av FLSync" : "FLSync är inte igång";
+  $("gone-text").textContent = old ? "Stäng det och dubbelklicka på FLSync." :
+    "Starta FLSync igen: dubbelklicka på FLSync.";
+  show("gone", true);
+}
+
+// --- the installer (FLSync.exe from the download, Reparera/Avinstallera FLSync) ---
+let setupLogOpened = false;
+
+function renderSetup(s) {
+  const u = s.setup;
+  document.body.classList.add("installing");
+  show("setup", true);
+  show("gone", false);
+  const pill = $("pill");
+  pill.textContent = s.summary.text;
+  pill.className = "pill " + s.summary.state;
+  const uninstall = u.kind === "uninstall";
+  const intro = u.intro || {};
+  const ready = u.state === "ready", done = u.state === "done";
+  $("setup-title").textContent = uninstall ? "Avinstallera FLSync" :
+    (intro.same ? "FLSync är installerat" : intro.present ? "Uppdatera FLSync" : "Installera FLSync");
+
+  show("setup-intro", ready && !uninstall);
+  if (ready && !uninstall) {
+    $("setup-intro-text").textContent = intro.same ?
+      "Den här versionen av FLSync finns redan på datorn. Starta den, eller installera om ifall något har gått sönder." :
+      intro.present ? "Det finns en äldre version av FLSync på datorn. Uppdateringen behåller dina inställningar och ställer in:" :
+      "Installationen ställer in allt som FLSync behöver på den här datorn:";
+    show("setup-what", !intro.same);
+    show("setup-fl", !!intro.fl_running && !intro.same);
+    show("setup-dry", !!u.dry_run);
+    $("setup-begin").textContent = intro.same ? "Installera om" : intro.present ? "Uppdatera" : "Installera";
+    $("setup-begin").classList.toggle("primary", !intro.same);
+    show("setup-skip", !!intro.same);
+    $("setup-skip").classList.toggle("primary", !!intro.same);
+  }
+
+  const q = u.question;
+  show("setup-question", !!q);
+  if (q) {
+    $("setup-question-text").textContent = q.text;
+    $("setup-yes").classList.toggle("primary", !!q.default);
+    $("setup-no").classList.toggle("primary", !q.default);
+  }
+  const lines = u.lines || [];
+  const last = lines.length ? lines[lines.length - 1] : "";
+  const waitingForFl = u.state === "running" && last.indexOf("Väntar på att FL Studio stängs") >= 0;
+  show("setup-busy", u.state === "running");
+  $("setup-busy").textContent = waitingForFl ? "Väntar på att du sparar och stänger FL Studio ..." :
+    (uninstall ? "Tar bort FLSync ..." : "Installerar ...");
+  show("setup-cancel-row", waitingForFl);
+
+  show("setup-done", done);
+  if (done) {
+    const stopped = u.code === 2 || lines.some((l) => l.indexOf("Avbrutet. Ingenting har ändrats.") >= 0);
+    const problems = u.problems || [], todo = u.todo || [];
+    let title, text, kind;
+    if (stopped) {
+      title = "Avbrutet"; text = "Ingenting har ändrats."; kind = "wait";
+    } else if (u.dry_run) {
+      title = "Provkörningen är klar"; text = "Ingenting har ändrats. Raderna under Vad som görs visar vad som skulle göras."; kind = "ok";
+    } else if (uninstall) {
+      title = problems.length ? "FLSync är borttaget, men allt gick inte" : "FLSync är borttaget";
+      text = "Det som finns kvar (projekt du har fått, inställningar) står under Vad som görs. Du kan stänga fönstret.";
+      kind = problems.length ? "bad" : "ok";
+    } else if (problems.length) {
+      title = "FLSync är installerat, men allt gick inte"; text = "Se nedan."; kind = "bad";
+    } else if (todo.length) {
+      title = "Nästan klart"; text = "Gör det som står under Kvar att göra."; kind = "wait";
+    } else {
+      title = "Klart! FLSync är installerat";
+      text = "Nästa gång startar du FLSync från skrivbordet eller Start-menyn. Starta FL Studio, och klicka Starta FLSync.";
+      kind = "ok";
+    }
+    $("setup-result").className = "banner " + kind;
+    $("setup-result-title").textContent = title;
+    $("setup-result-text").textContent = text;
+    show("setup-problems", problems.length > 0);
+    fill($("setup-problem-list"), problems, (p) => el("li", null, p));
+    show("setup-todo", todo.length > 0);
+    fill($("setup-todo-list"), todo, (t) => el("li", null, t));
+    show("setup-launch", !uninstall && !stopped);
+  }
+
+  if (u.state !== "ready" && !setupLogOpened) { $("setup-log-box").open = true; setupLogOpened = true; }
+  const log = $("setup-log");
+  const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 4;
+  log.textContent = lines.join("\n");
+  if (atBottom) log.scrollTop = log.scrollHeight;
+}
+
+function fill(list, items, render) {
+  list.replaceChildren(...items.map(render));
+}
+
+function fixList(fix) {
+  const steps = Array.isArray(fix) ? fix : (fix ? [fix] : []);
+  const list = el(steps.length > 1 ? "ol" : "ul", "fix");
+  for (const step of steps) list.append(el("li", null, step));
+  return list;
+}
+
+const ICONS = { ok: "✓", bad: "✗", wait: "…", off: "–" };
+
+function render(s) {
+  state = s;
+  $("app-version").textContent = s.app_version || "";
+  if (s.setup) { renderSetup(s); return; }
+  document.body.classList.remove("installing");
+  show("gone", false);
+  const pill = $("pill");
+  pill.textContent = s.summary.text;
+  pill.className = "pill " + s.summary.state;
+
+  const name = $("name");
+  if (document.activeElement !== name && $("save-name").hidden) name.value = s.name;
+
+  // The last action's problem, until it is closed.
+  const error = s.error;
+  show("error", !!error && hiddenError !== (error && error.id));
+  if (error) {
+    $("error-title").textContent = error.title;
+    $("error-text").textContent = error.text || "";
+    $("error-fix").replaceChildren(...fixList(error.fix).children);
+  }
+  const warning = s.open_warning;
+  show("open-warning", !!warning);
+  if (warning) {
+    $("open-warning-title").textContent = warning.title;
+    $("open-warning-text").textContent = warning.text;
+  }
+
+  // Start, join, or the session.
+  show("start", !s.mode && !s.busy);
+  show("busy", !!s.busy);
+  $("busy-text").textContent = s.busy || "";
+  show("resuming", !!s.resuming && !s.busy);
+  $("resuming-text").textContent = s.resuming ? s.resuming.text : "";
+  if (!filledCode && s.settings.last_invite) { $("code").value = s.settings.last_invite; filledCode = true; }
+  if (!filledPort) { $("port").value = s.settings.relay_port; filledPort = true; }
+  $("host").classList.toggle("primary", s.settings.last_mode !== "join");
+  $("join").classList.toggle("primary", s.settings.last_mode !== "host");
+
+  show("hosting", s.mode === "host");
+  if (s.mode === "host") {
+    const inv = s.invite;
+    show("invite-wait", !inv);
+    show("invite-ready", !!inv);
+    if (inv) {
+      $("invite").textContent = inv.code;
+      $("addresses").textContent = "Adresser i koden: " +
+        inv.addresses.map((a) => a.ip + " (" + a.kind + ")").join(", ") + ", port " + inv.port;
+      show("invite-note", !!inv.note);
+      $("invite-note").textContent = inv.note || "";
+    }
+    const router = s.router;
+    const box = $("router");
+    box.replaceChildren();
+    if (router) {
+      const line = el("div");
+      line.append(el("span", "icon " + router.state, ICONS[router.state] + " "), document.createTextNode(router.title));
+      box.append(line);
+      if (router.detail) box.append(el("div", "muted", router.detail));
+      if (router.fix) box.append(fixList(router.fix));
+    }
+  }
+  show("joined", s.mode === "join");
+  if (s.mode === "join") $("joined-text").textContent = s.joined_text || "";
+
+  // The checklist.
+  fill($("checks"), s.checks, (c) => {
+    const li = el("li");
+    li.append(el("span", "icon " + c.state, ICONS[c.state] || "?"));
+    const body = el("div");
+    body.append(el("div", null, c.title));
+    if (c.detail) body.append(el("div", "muted small", c.detail));
+    if (c.fix && c.fix.length) body.append(fixList(c.fix));
+    li.append(body);
+    return li;
+  });
+
+  // Participants, the pen and the sync.
+  show("people-box", s.people.length > 0);
+  fill($("people"), s.people, (p) => {
+    const li = el("li");
+    li.append(el("strong", null, p.name));
+    if (p.me) li.append(el("span", "tag accent", "du"));
+    li.append(el("span", "muted", p.app === "fl" ? (p.flv ? "FL " + p.flv : "FL") : p.app));
+    if (p.pen) li.append(el("span", "tag accent", "ändrar strukturen"));
+    return li;
+  });
+  show("people-note", !!s.people_note);
+  $("people-note").textContent = s.people_note || "";
+  show("pen", !!s.pen);
+  $("pen").textContent = s.pen ? s.pen.text : "";
+  show("sync-box", !!s.sync);
+  $("sync").textContent = s.sync ? s.sync.text : "";
+  show("share-mine", !!(s.sync && s.sync.share));
+
+  // The newest version.
+  const v = s.version;
+  show("version-box", !!v);
+  if (v) {
+    $("version-title").textContent = "Version " + v.v + " av " + v.name + " från " + v.by + (v.time ? ", " + v.time : "");
+    $("version-details").textContent = v.details;
+    show("version-newer", !!v.newer);
+    $("version-newer").textContent = v.newer || "";
+    const missing = $("version-missing");
+    missing.hidden = !v.missing.length;
+    missing.replaceChildren();
+    if (v.missing.length) {
+      missing.append(el("div", "warn", "Saknas på den här datorn (de kanalerna låter inte här, men synken fungerar):"));
+      const list = el("ul", "fix");
+      for (const m of v.missing) list.append(el("li", null, m));
+      missing.append(list);
+    }
+    $("version-state").textContent = v.state_text;
+    const saved = s.saved;
+    show("saved", !!saved);
+    $("saved").textContent = saved ? "Senast du sparade (" + saved.time + "): " + saved.text : "";
+    $("saved").className = "small" + (saved && saved.state === "bad" ? " warn" : "");
+    $("open").disabled = !v.can_open;
+    $("open-folder").disabled = !v.can_open;
+  }
+
+  // Notes.
+  show("notes-box", s.notes.length > 0);
+  fill($("notes"), s.notes, (n) => {
+    const li = el("li");
+    li.append(el("span", "muted", n.time), document.createTextNode(" " + n.text));
+    return li;
+  });
+
+  // The log, newest last; it keeps its place unless you're at the bottom.
+  const log = $("log");
+  const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 4;
+  log.textContent = s.log.map((l) => l.time + "  " + l.text).join("\n");
+  if (atBottom) log.scrollTop = log.scrollHeight;
+
+  show("leave", !!s.mode);
+}
+
+async function refresh() {
+  try {
+    render(await api("status"));
+  } catch (e) {
+    goneBecause(e);
+    $("pill").textContent = "Inte igång";
+    $("pill").className = "pill bad";
+  }
+  setTimeout(refresh, 1000);
+}
+
+async function act(path, body, button) {
+  if (button) button.disabled = true;
+  try {
+    const answer = await api(path, body || {});
+    if (answer.ok) hiddenError = null;
+    render(await api("status"));
+    return answer;
+  } catch (e) {
+    goneBecause(e);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+$("host").addEventListener("click", (e) => {
+  const port = parseInt($("port").value, 10);
+  act("host", { port: Number.isFinite(port) ? port : null }, e.target);
+});
+$("join").addEventListener("click", (e) => act("join", { code: $("code").value }, e.target));
+$("code").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("join").click(); }
+});
+$("leave").addEventListener("click", (e) => {
+  const others = state && state.people.filter((p) => !p.me).length;
+  if (state && state.mode === "host" && others &&
+      !confirm("Du är värd. Om du lämnar avslutas sessionen för alla. Lämna ändå?")) return;
+  act("leave", {}, e.target);
+});
+$("quit").addEventListener("click", async (e) => {
+  const hosting = state && state.mode === "host";
+  if (!confirm(hosting ? "Avsluta FLSync? Sessionen avslutas för alla." : "Avsluta FLSync?")) return;
+  await act("quit", {}, e.target);
+  window.close();  // FLSync's own window (a browser tab stays, showing that FLSync has ended)
+});
+$("setup-begin").addEventListener("click", (e) => act("setup", { action: "begin" }, e.target));
+$("setup-skip").addEventListener("click", (e) => act("setup", { action: "launch" }, e.target));
+$("setup-launch").addEventListener("click", (e) => act("setup", { action: "launch" }, e.target));
+$("setup-yes").addEventListener("click", (e) => act("setup", { action: "answer", yes: true }, e.target));
+$("setup-no").addEventListener("click", (e) => act("setup", { action: "answer", yes: false }, e.target));
+$("setup-cancel").addEventListener("click", (e) => act("setup", { action: "cancel" }, e.target));
+$("setup-close").addEventListener("click", async (e) => {
+  await act("quit", {}, e.target);
+  window.close();
+});
+$("open").addEventListener("click", (e) => act("open", {}, e.target));
+$("stop-resuming").addEventListener("click", (e) => act("leave", {}, e.target));
+$("share-mine").addEventListener("click", (e) => {
+  if (confirm("Dela ditt projekt med sessionen? Det ersätter sessionens projekt, och de andra får öppna ditt."))
+    act("share", {}, e.target);
+});
+$("open-folder").addEventListener("click", (e) => act("open", { folder: true }, e.target));
+$("new-code").addEventListener("click", (e) => {
+  if (confirm("Göra en ny kod? Den gamla slutar fungera för nya anslutningar. De som redan är med påverkas inte, " +
+              "men tappar någon anslutningen behöver hen den nya koden."))
+    act("newcode", {}, e.target);
+});
+$("error-close").addEventListener("click", () => {
+  hiddenError = state && state.error && state.error.id;
+  show("error", false);
+});
+$("name").addEventListener("input", () => show("save-name", true));
+$("name").addEventListener("keydown", (e) => { if (e.key === "Enter") $("save-name").click(); });
+$("save-name").addEventListener("click", async (e) => {
+  await act("name", { name: $("name").value }, e.target);
+  show("save-name", false);
+});
+$("copy").addEventListener("click", async () => {
+  const text = $("invite").textContent;
+  let done = false;
+  try { await navigator.clipboard.writeText(text); done = true; } catch (e) { /* below */ }
+  if (!done) {
+    const area = el("textarea");
+    area.value = text;
+    document.body.append(area);
+    area.select();
+    try { done = document.execCommand("copy"); } catch (e) { done = false; }
+    area.remove();
+  }
+  const note = $("copied");
+  note.textContent = done ? "Kopierad!" : "Markera koden och kopiera med Ctrl+C";
+  note.hidden = false;
+  setTimeout(() => { note.hidden = true; }, 2500);
+});
+// The window closes: FLSync ends with it (unless this was a reload: then the page is back at once).
+window.addEventListener("pagehide", () => {
+  try { navigator.sendBeacon("/api/bye?t=" + encodeURIComponent(token), ""); } catch (e) { /* FLSync is gone */ }
+});
+refresh();
+</script>
+</body>
+</html>

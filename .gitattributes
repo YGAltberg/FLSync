@@ -1,0 +1,7 @@
+# The same line endings for everyone who clones, whatever their core.autocrlf:
+# LF, except the console files cmd.exe reads (CRLF; tests/test_setup.py checks).
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.ico binary
+*.exe binary
+*.flp binary

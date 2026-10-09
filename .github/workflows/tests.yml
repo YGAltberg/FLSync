@@ -1,0 +1,28 @@
+name: Tester
+
+# Every push and pull request: the whole test suite on Windows (FLSync is
+# Windows only), with FLSync.exe built first so that its tests run too.
+# Tests that need FL Studio's own files skip themselves here.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Bygg FLSync.exe
+        run: python scripts/build_exe.py
+      - name: Kör testerna
+        run: python -m unittest discover -s tests
