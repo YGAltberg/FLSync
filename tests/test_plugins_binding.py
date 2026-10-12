@@ -368,8 +368,13 @@ class FakeLink:
         self.incoming = []
         self.sent = []
 
+    stats = {"gaps": 0}  # MidiLink's counters the client reads
+
     def alive(self, now):
         return True
+
+    def forgive(self, now):
+        pass
 
     def can_send(self):
         return True

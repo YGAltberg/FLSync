@@ -153,8 +153,14 @@ def saved_text(msg):
     if outcome == "pulled":
         return "Du hade inget nytt att dela, så du får %s version%s." % (genitive(others), version) + opening
     if outcome == "unrelated":
-        return ("Projektet delades inte: det du har öppet i FL hör inte till sessionen. Öppna sessionens version, "
-                "eller klicka Dela mitt projekt om det ska bli sessionens.")
+        return ("Projektet delades inte: det du har öppet i FL hör inte till sessionen. Spara igen i FL (Ctrl+S) "
+                "inom %s sekunder, eller klicka Dela mitt projekt, om det ska bli allas projekt. Annars: öppna "
+                "sessionens version." % (msg.get("confirm") or 15))
+    if outcome == "switched":
+        return "Ditt projekt är nu sessionens%s: de andra får det öppnat i sina FL." % version
+    if outcome == "old":
+        return ("%s bytte sessionens projekt, så din sparning delades inte (den finns kvar i din fil)."
+                % capital(others)) + opening
     if outcome == "replaced":
         return ("Din version kunde inte slås ihop med %s version (%s), så den ersatte den. %s version finns kvar "
                 "i mappen Versioner bredvid projektet." % (genitive(others), msg.get("why") or "okänt skäl",
@@ -1458,8 +1464,9 @@ class App:
             return None
         if bridge.unrelated:
             return {"text": "Projektet du har öppet i FL hör inte till sessionen, så det du sparar delas inte. Öppna "
-                            "sessionens version nedan, eller klicka Dela mitt projekt om ditt projekt ska bli "
-                            "sessionens (de andra får då öppna det).", "share": True}
+                            "sessionens version nedan, eller spara två gånger i rad i FL (Ctrl+S) eller klicka Dela "
+                            "mitt projekt om ditt projekt ska bli sessionens (de andra får då öppna det).",
+                    "share": True}
         if not bridge.fl_fp or not bridge.session_fp or bridge.fl_fp == bridge.session_fp:
             return None
         pen = self._pen_holder()

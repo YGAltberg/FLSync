@@ -280,8 +280,9 @@ class RelayStructureTest(Session):
                 return messages
             messages.append(msg)
 
-    def put(self, sharer, name="Beat", fp=FP_A, samples=(), plugins=()):
-        """Upload a project and its samples, then send snap_put as `sharer`."""
+    def put(self, sharer, name="Beat", fp=FP_A, samples=(), plugins=(), **extra):
+        """Upload a project and its samples, then send snap_put as `sharer`
+        (with the optional fields in `extra`)."""
         files = self.files()
         project = make_project(title=name + str(len(self.clients)))
         refs = []
@@ -289,8 +290,8 @@ class RelayStructureTest(Session):
             self.assertEqual(files.upload(data), {"t": "blob_ok", "h": sha256(data)})
             if i:
                 refs.append({"h": sha256(data), "size": len(data), "path": "C:\\s\\%d.wav" % i})
-        sharer.send({"t": "snap_put", "name": name, "fp": fp, "flp": sha256(project), "size": len(project),
-                     "samples": refs, "plugins": list(plugins)})
+        sharer.send(dict({"t": "snap_put", "name": name, "fp": fp, "flp": sha256(project), "size": len(project),
+                          "samples": refs, "plugins": list(plugins)}, **extra))
         return project, refs
 
     def test_the_first_fl_to_share_sets_the_structure(self):
@@ -301,6 +302,59 @@ class RelayStructureTest(Session):
         b = self.raw("B", "fl", fp=FP_B)  # another structure, but A is here: A's stays
         self.assertEqual((b.welcome["seed"], b.welcome["fp"]), (False, FP_A))
         self.assertEqual(self.relay.fp, FP_A)
+
+    def test_only_keys_of_the_part_that_differs_are_refused(self):
+        # FL's fingerprint is the channels' 6 digits, then the mixer's: B has
+        # other channels than the session, but the same mixer.
+        fp_b = "bbbbbb" + FP_A[6:]
+        a, b = self.raw("A", "fl", fp=FP_A), self.raw("B", "fl", fp=fp_b)
+        for client in (a, b):
+            self.rest(client)
+        b.send({"t": "sets", "l": 1, "kv": [["m/1/v", 0.1], ["c/1/v", 0.2], ["s/tempo", 120]], "fp": fp_b})
+        self.assertEqual(self.rest(b), [{"t": "ack", "l": 1, "s": 2, "stale": ["c/1/v"]}])
+        self.assertEqual(self.rest(a), [{"t": "sets", "from": b.id, "kv": [["m/1/v", 0.1], ["s/tempo", 120]],
+                                         "s": 2}])
+        b.send({"t": "sets", "l": 2, "kv": [["c/2/v", 0.3], ["g/1/0/1", True]], "fp": fp_b})
+        self.assertEqual(self.rest(b), [{"t": "ack", "l": 2, "s": 2, "stale": True}])
+        self.assertEqual(self.relay.state, {"m/1/v": 0.1, "s/tempo": 120})
+
+    def test_a_new_structure_keeps_the_values_of_the_part_that_stayed(self):
+        a = self.raw("A", "fl", fp=FP_A)
+        a.send({"t": "sets", "l": 1, "kv": [["m/1/v", 0.1], ["c/1/v", 0.2], ["s/tempo", 120]], "fp": FP_A})
+        self.rest(a)
+        a.send({"t": "fp", "fp": "bbbbbb" + FP_A[6:]})  # alone: its new channels become the session's
+        self.assertEqual(self.rest(a), [{"t": "reshare"}])
+        self.assertEqual(self.relay.state, {"m/1/v": 0.1, "s/tempo": 120})
+        a.send({"t": "fp", "fp": FP_B})  # now its mixer changed too
+        self.assertEqual(self.rest(a), [{"t": "reshare"}])
+        self.assertEqual(self.relay.state, {"s/tempo": 120})
+        a.send({"t": "sets", "l": 2, "kv": [["m/1/v", 0.4]], "fp": FP_B})
+        self.rest(a)
+        a.send({"t": "fp", "fp": "x"})  # a fingerprint that isn't FL's two parts differs everywhere
+        self.assertEqual(self.rest(a), [{"t": "reshare"}])
+        self.assertEqual(self.relay.state, {"s/tempo": 120})
+
+    def test_another_project_starts_everything_over(self):
+        a, b = self.raw("A", "fl", fp=FP_A), self.raw("B", "fl", fp=FP_A)
+        a.send({"t": "sets", "l": 1, "kv": [["m/1/v", 0.1], ["s/tempo", 120]], "fp": FP_A})
+        for client in (a, b):
+            self.rest(client)
+        self.put(b, name="Annat", switch=True)  # the same structure, but another project ("Dela mitt projekt")
+        snapshot, = self.rest(a)
+        self.assertEqual((snapshot["t"], snapshot["switch"], snapshot["by"]), ("snapshot", True, "B"))
+        self.assertEqual(self.relay.state, {})
+        self.assertIn({"t": "reshare"}, self.rest(b))
+
+    def test_a_note_goes_to_the_others(self):
+        a, b = self.raw("A", "fl", fp=FP_A), self.raw("B", "fl", fp=FP_A)
+        for client in (a, b):
+            self.rest(client)
+        b.send({"t": "note", "kind": "unrelated", "name": "Mitt projekt"})
+        self.assertEqual(self.rest(a), [{"t": "note", "kind": "unrelated", "name": "Mitt projekt", "from": b.id,
+                                         "by": "B"}])
+        self.assertEqual(self.rest(b), [])
+        b.send({"t": "note", "kind": "något annat", "name": "x"})
+        self.assertEqual([msg["t"] for msg in self.rest(b)], ["error"])
 
     def test_batches_for_another_structure_are_refused(self):
         a, b, m = self.raw("A", "fl", fp=FP_A), self.raw("B", "fl", fp=FP_B), self.raw("M")
@@ -1681,14 +1735,18 @@ class EndToEndTest(EndToEnd):
         self.wait_for(lambda: self.relay.fp == a.client.my_fp and a.client.synced and not b.client.synced
                       and self.relay.state.get("m/3/v") == 0.4, timeout=20)
         self.wait_for(lambda: any("ligger i" in line for line in b.logs))
-        b.set_volume(6, 0.2)  # paused: nothing goes out
+        # Only the channels differ: the mixer still syncs both ways, the channels don't.
+        b.set_volume(6, 0.2)
         a.set_volume(7, 0.6)
-        pump(self.fls, lambda: False, 1.0)
-        self.assertNotEqual(b.volume(7), 0.6)
-        self.assertEqual(self.relay.state["m/6/v"], 0.8)  # A's value, from its reshare; B's stayed home
+        self.wait_for(lambda: b.volume(7) == 0.6 and a.volume(6) == 0.2, timeout=10)
+        a_channels, b_channels = a.project.modules["channels"], b.project.modules["channels"]
+        a_channels.setChannelName(0, "Annas", True)
+        self.wait_for(lambda: self.relay.state.get("c/0/n") == "Annas", timeout=10)
+        pump(self.fls, lambda: False, 0.5)
+        self.assertNotEqual(b_channels.getChannelName(0, True), "Annas")
         b.project.rack.add_channel(len(b.project.rack.channels), "Perc")  # B opens A's version
         b.load_project({})
-        self.wait_for(lambda: b.client.synced and b.volume(7) == 0.6, timeout=20)
+        self.wait_for(lambda: b.client.synced and b_channels.getChannelName(0, True) == "Annas", timeout=20)
         a.set_volume(5, 0.3)
         self.wait_for(lambda: b.volume(5) == 0.3)
 

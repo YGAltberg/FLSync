@@ -49,7 +49,10 @@ PROTO = 2                   # of the files connection; FL's session says its own
 PUMP_INTERVAL = 0.01        # seconds between rounds of MIDI in and out
 EVENTS_PER_PUMP = 60        # one event per byte; this paces bursts so they don't flood FL
 HEARTBEAT_INTERVAL = 0.03   # also clocks the FL script
-FL_TIMEOUT = 5.0            # FL counts as gone after this long without an event
+FL_TIMEOUT = 5.0            # FL silent this long is busy (loading, saving, a dialog) while its window is open...
+FL_GONE = 120.0             # ...and counts as gone after this long, or as soon as its window is closed
+FL_CHECK_INTERVAL = 1.0     # how often a silent FL's window is looked for
+CONFIRM_TIME = 15.0         # saving a project that isn't the session's again within this makes it everyone's
 CONNECT_TIMEOUT = 5.0
 MIDI_RETRY = 2.0            # seconds between attempts to (re)open the MIDI ports
 MAX_LINE = 64 << 20         # the welcome holds the session's whole state and its stored notes
@@ -307,6 +310,19 @@ def fl_window_title():
     TFruityLoopsMainForm), or None: not Windows, FL isn't running, or more than
     one FL is (then it can't be told which one is ours). Reading another
     program's window title never waits for that program."""
+    titles = _fl_titles()
+    return titles[0] if titles and len(titles) == 1 else None
+
+
+def fl_window_open():
+    """Whether an FL Studio main window is open (FL may be busy, but it runs),
+    or None if that can't be told (not Windows)."""
+    titles = _fl_titles()
+    return None if titles is None else bool(titles)
+
+
+def _fl_titles():
+    """The titles of FL Studio's main windows, or None if they can't be read."""
     global _windows
     if sys.platform != "win32":
         return None
@@ -336,7 +352,7 @@ def fl_window_title():
         user32.EnumWindows(each_window(each), 0)
     except (OSError, AttributeError, ValueError, TypeError):
         return None
-    return titles[0] if len(titles) == 1 else None
+    return titles
 
 
 def running_fl():
@@ -492,6 +508,8 @@ def clean_snapshot(msg):
     merged = msg.get("merged")
     if isinstance(merged, list) and merged and all(isinstance(n, str) and n for n in merged):
         snapshot["merged"] = [n[:40] for n in merged[:10]]  # whose versions it includes besides its sharer's
+    if msg.get("switch") is True:
+        snapshot["switch"] = True  # it replaced the session's project: not one to merge a save of the old with
     return snapshot
 
 
@@ -504,6 +522,8 @@ def short(snapshot, how=None):
         notice["flv"] = snapshot["flv"]
     if snapshot.get("merged"):
         notice["merged"] = [n[:20] for n in snapshot["merged"][:3]]
+    if snapshot.get("switch"):
+        notice["switch"] = True
     if how:
         notice["how"] = how
     return notice
@@ -794,7 +814,7 @@ class Bridge:
     def __init__(self, relay_host, relay_port, send_to_fl, logger=log, name=None, project=None, mru=None,
                  cache_dir=None, projects_dir=None, notes_dir=None, plugin_db=None, fl_dirs=None,
                  auto_open=False, opener=None, password=None, fl_title=None, state_path=None, open_merged=True,
-                 flp_writes=None, mru_all=None):
+                 flp_writes=None, mru_all=None, fl_open=None):
         self.relay_host = relay_host
         self.relay_port = relay_port
         self.send_to_fl = send_to_fl
@@ -809,6 +829,11 @@ class Bridge:
         self.writer = None
         self.fl_name = None
         self.fl_last_heard = None
+        self.fl_open = fl_window_open if fl_open is None else fl_open  # whether FL's window is open (fl_window_open)
+        self.fl_busy = False      # FL is silent but its window is open: it stays in the session for now
+        self.fl_seen_open = True  # what fl_open() said last (asked once per FL_CHECK_INTERVAL)
+        self.next_fl_check = 0.0
+        self.left_silent = False  # the relay was left because FL went silent: tell FL once it's heard again
         self.next_heartbeat = 0.0
 
         fl_dirs = fl_folders() if fl_dirs is None else fl_dirs
@@ -893,6 +918,7 @@ class Bridge:
         self.share_answer = None  # (sha256, future) of a snap_put waiting for the relay's answer
         self.force_share = False  # "Dela mitt projekt": the next share replaces the session's project
         self.unrelated = False   # FL's project isn't the session's: its saves aren't shared
+        self.unrelated_at = None  # when such a save was refused: saving again within CONFIRM_TIME shares it
         self.last_saved = None   # the outcome of the last save, for the launcher's page
         self._load_state()
 
@@ -902,9 +928,18 @@ class Bridge:
         status, data1, data2 = wire.unpack(message)
         if not self.decoder.accepts(status):
             return  # our own events echoed by a shared port, or other MIDI
+        now = time.monotonic()
         if self.fl_last_heard is None:
             self.log("FL hörs på MIDI")
-        self.fl_last_heard = time.monotonic()
+            if self.left_silent and self.session is None:
+                # FL may not have noticed that we left (it was busy all along):
+                # this makes its script join again.
+                self.to_fl({"t": "link", "up": False, "msg": "bryggan lämnade sessionen när FL inte svarade"})
+            self.left_silent = False
+        elif self.fl_busy:
+            self.log("FL svarar igen efter %.0f s" % (now - self.fl_last_heard))
+        self.fl_busy = False
+        self.fl_last_heard = now
         msg = self.decoder.feed(status, data1, data2)
         if msg is None or msg is wire.HEARTBEAT:
             return
@@ -968,10 +1003,18 @@ class Bridge:
                 self.peers[msg["id"]] = msg
         elif kind == "peer_leave":
             self.peers.pop(msg.get("id"), None)
+        elif kind == "note":
+            self._on_note(msg)
         elif kind == "error":
             self.log("relayn: %s" % msg.get("msg"))
         if msg is not None:
             self.to_fl(msg)
+
+    def _on_note(self, msg):
+        """Someone else's FL did something worth knowing (relay `note`)."""
+        if msg.get("kind") == "unrelated":
+            self.log("%s sparade '%s', som inte är sessionens projekt, så det delades inte. Sparar hen igen inom "
+                     "%d sekunder blir det allas projekt" % (msg.get("by"), msg.get("name"), CONFIRM_TIME))
 
     def _answers_share(self, msg):
         """Whether `msg` answers the snap_put we wait for: our snapshot coming
@@ -1111,15 +1154,36 @@ class Bridge:
         if now >= self.next_heartbeat:
             self.send_to_fl(self.encoder.heartbeat())
             self.next_heartbeat = now + HEARTBEAT_INTERVAL
-        for _ in range(min(EVENTS_PER_PUMP, len(self.outgoing))):
-            self.send_to_fl(self.encoder.event(*self.outgoing.popleft()))
+        if not self.fl_busy:  # a busy FL reads nothing: messages wait here rather than in the MIDI driver
+            for _ in range(min(EVENTS_PER_PUMP, len(self.outgoing))):
+                self.send_to_fl(self.encoder.event(*self.outgoing.popleft()))
         heard = self.fl_last_heard
-        if heard is not None and now - heard > FL_TIMEOUT:
-            self.fl_last_heard = None
-            self.decoder = wire.Decoder(wire.FROM_FL)
-            if self.session is not None:
-                self.log("FL svarar inte längre, lämnar relayn")
-                self.close_session()
+        if heard is None or now - heard <= FL_TIMEOUT:
+            return
+        if self.session is not None and now - heard < FL_GONE and self._fl_still_open(now):
+            # Loading a plugin or a project, saving, a dialog: FL's script is
+            # silent until it's done. Leaving would drop FL from the session.
+            if not self.fl_busy:
+                self.fl_busy = True
+                self.log("FL svarar inte just nu (laddar eller sparar kanske något), stannar kvar i sessionen")
+            return
+        self.fl_last_heard = None
+        self.fl_busy = False
+        self.decoder = wire.Decoder(wire.FROM_FL)
+        if self.session is not None:
+            self.log("FL svarar inte längre, lämnar relayn")
+            self.close_session()
+            self.left_silent = True
+
+    def _fl_still_open(self, now):
+        """Whether FL's window is still there (asked at most once per FL_CHECK_INTERVAL)."""
+        if now >= self.next_fl_check:
+            self.next_fl_check = now + FL_CHECK_INTERVAL
+            try:
+                self.fl_seen_open = self.fl_open() is not False  # can't tell: as if it were
+            except Exception:
+                self.fl_seen_open = True
+        return self.fl_seen_open
 
     # --- running ---------------------------------------------------------------
 
@@ -1406,8 +1470,10 @@ class Bridge:
                 done = await self._share_mine(mine, newest, "shared", force=True)  # "Dela mitt projekt"
             elif newest is None or newest["flp"] == self.base:
                 done = await self._share_mine(mine, newest, "shared")  # nobody else shared since: fast forward
+            elif newest.get("switch") and newest["flp"] not in self.shared:
+                done = await self._not_ours(mine, newest)  # a save of the project the session left: FL opens the new
             elif self.base is None and self._other_fls():
-                done = self._not_ours(mine)
+                done = await self._not_ours(mine, newest)
             elif self.base is None:
                 done = await self._share_mine(mine, newest, "shared")  # alone: the project becomes the session's
             else:
@@ -1418,16 +1484,36 @@ class Bridge:
         self.log("De andra delar nya versioner hela tiden, försöker igen om en stund")
         return False
 
-    def _not_ours(self, mine):
+    async def _not_ours(self, mine, newest):
         """A save of a project that isn't the session's (FL didn't open it from
         a version, and it was never shared): others work on the session's
-        project, so it isn't shared. "Dela mitt projekt" (share_mine) does."""
+        project, so it isn't shared, and they hear of it. Saving it again
+        within CONFIRM_TIME shares it as everyone's project, as "Dela mitt
+        projekt" (share_mine) does. If someone else made another project the
+        session's (a switch), this is the old one: FL opens the new one."""
+        now = time.monotonic()
+        if newest is not None and newest.get("switch") and newest["flp"] not in self.shared:
+            self.unshareable = mine["sha"]
+            path = self.received.get(newest["flp"])
+            title = self.to_open["title"] if self.to_open and self.to_open.get("flp") == newest["flp"] else None
+            how = self._launch(path, newest, title, "switched") if path and os.path.isfile(path) else "no"
+            self.log("'%s' delas inte: %s bytte sessionens projekt till '%s'%s" % (
+                mine["name"], newest["by"], newest["name"], ", som öppnas nu" if how == "now" else ""))
+            self._tell_saved("old", v=newest["v"], others=[newest["by"]], open=how)
+            return True
+        if self.unrelated_at is not None and now - self.unrelated_at <= CONFIRM_TIME:
+            self.unrelated_at = None
+            self.log("'%s' sparades igen, så det blir sessionens projekt" % mine["name"])
+            return await self._share_mine(mine, newest, "switched", force=True)
         self.unshareable = mine["sha"]
+        self.unrelated_at = now
         if not self.unrelated:
-            self.log("'%s' delas inte: projektet hör inte till sessionen. Öppna sessionens version, eller välj "
-                     "Dela mitt projekt i FLSync-fönstret för att byta projekt för alla" % mine["name"])
+            self.log("'%s' delas inte: projektet hör inte till sessionen. Spara igen (Ctrl+S) inom %d sekunder för "
+                     "att göra det till allas projekt, eller öppna sessionens version i FLSync-fönstret"
+                     % (mine["name"], CONFIRM_TIME))
         self.unrelated = True
-        self._tell_saved("unrelated")
+        self._to_relay({"t": "note", "kind": "unrelated", "name": mine["name"][:MAX_NAME]})
+        self._tell_saved("unrelated", confirm=int(CONFIRM_TIME))
         return True
 
     def share_mine(self):
@@ -1446,14 +1532,16 @@ class Bridge:
         forward), has everything the newest has, or replaces it (`force`, or a
         merge that was refused: `why`)."""
         parent = newest["v"] if newest else 0
+        # Replacing the session's project (`force`) is a switch: the others don't
+        # merge their saves of the old one with it, they open it instead.
         answer = await self._put(mine["data"], mine["sha"], mine["name"], mine["project"], mine["samples"],
-                                 parent, self.fl_fp)
+                                 parent, self.fl_fp, switch=force and newest is not None)
         if answer[0] == "outdated" and not force:
             return "outdated"
         if answer[0] == "outdated":  # replacing: whatever came meanwhile is replaced too
             newest = self.newest
             answer = await self._put(mine["data"], mine["sha"], mine["name"], mine["project"], mine["samples"],
-                                     newest["v"] if newest else 0, self.fl_fp)
+                                     newest["v"] if newest else 0, self.fl_fp, switch=newest is not None)
         if answer[0] != "ok":
             self.log("Kunde inte dela '%s': %s" % (mine["name"], answer[1]))
             self._tell_saved("failed", why=str(answer[1]))
@@ -1553,7 +1641,7 @@ class Bridge:
         self._tell_saved("pulled", v=newest["v"], others=[newest["by"]], open=how)
         return True
 
-    async def _put(self, data, sha, name, project, samples, parent, fp, merged=()):
+    async def _put(self, data, sha, name, project, samples, parent, fp, merged=(), switch=False):
         """Upload a project and its samples, announce it with snap_put and wait
         for the relay's answer: ("ok", version), ("outdated", newest version:
         someone shared since `parent`) or ("error", text)."""
@@ -1584,6 +1672,8 @@ class Bridge:
                "plugins": plugins[:MAX_LIST], "samples": entries, "parent": parent}
         if merged:
             msg["merged"] = [n[:40] for n in merged][:10]
+        if switch:
+            msg["switch"] = True
         version = fl_version(project.version) or self.fl_version
         if version:
             msg["flv"] = version  # the FL that saved it, so everyone can see it
@@ -1611,9 +1701,12 @@ class Bridge:
             uploaded, "fil" if uploaded == 1 else "filer"))
         return answer
 
-    def _tell_saved(self, outcome, v=None, others=(), open=None, why=None, conflicts=0, taken=0):
-        """Tell FL how its save went (docs/phase4.md, Messages)."""
+    def _tell_saved(self, outcome, v=None, others=(), open=None, why=None, conflicts=0, taken=0, confirm=None):
+        """Tell FL how its save went (docs/phase4.md, Messages). `confirm`: the
+        seconds within which saving again shares a project that isn't the session's."""
         msg = {"t": "saved", "outcome": outcome}
+        if confirm:
+            msg["confirm"] = confirm
         if v:
             msg["v"] = v
         if others:
@@ -1903,6 +1996,11 @@ class Bridge:
         self.session_fp = snapshot["fp"]
         if self.newest is None or snapshot["v"] >= self.newest["v"]:
             self.newest = snapshot
+        if snapshot.get("switch") and snapshot["from"] != self.my_id and self.base not in (None, snapshot["flp"]):
+            # Someone made another project the session's: FL's is the old one now,
+            # and a save of it mustn't be merged with the new (_not_ours opens that).
+            self.log("%s bytte sessionens projekt till '%s'" % (snapshot["by"], snapshot["name"]))
+            self._set_base(None, self.base_project)
         if snapshot["from"] == self.my_id:
             self.log("Version %d av '%s' är delad" % (snapshot["v"], snapshot["name"]))
             return dict({"t": "snapshot"}, **short(snapshot))
@@ -1994,6 +2092,8 @@ class Bridge:
                 self.log("Kunde inte öppna %s: %s" % (path, e))
         elif opening:
             self._launch(path, snapshot, project.title, "received")
+        elif snapshot.get("switch") and self.base is None:
+            self._launch(path, snapshot, project.title, "switched")  # when playback stops, if nothing is unsaved
 
     async def version_file(self, snapshot):
         """The file FL opens for `snapshot` (the launcher's "Öppna senaste

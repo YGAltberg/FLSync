@@ -17,8 +17,13 @@ class FakeLink:
         self.up = True
         self.sending = False  # True: earlier messages are still queued for the bridge
 
+    stats = {"gaps": 0}  # MidiLink's counters the client reads
+
     def alive(self, now):
         return self.up
+
+    def forgive(self, now):
+        pass
 
     def can_send(self):
         return True
@@ -372,7 +377,7 @@ class ClientTest(unittest.TestCase):
     def test_joining_a_session_with_another_structure_pauses_both_ways(self):
         self.join(state={"m/3/v": 0.25}, peers=[self.KIM], fp="0123456789ab")
         self.assertEqual(self.fl.volume(3), 0.8)  # their values are for other channels
-        self.wait_for_hint("FLSync pausad: öppna samma projekt som de andra")
+        self.wait_for_hint("pausade, öppna samma projekt som de andra")
         self.fl.set_volume(2, 0.5)
         self.link.incoming.append({"t": "sets", "from": "c2", "kv": [["m/4/v", 0.1]], "s": 3})
         self.tick(5)
@@ -385,16 +390,17 @@ class ClientTest(unittest.TestCase):
         self.tick(25)  # the fingerprint is checked once a second
         new_fp = self.structure()
         self.assertEqual(self.link.take("fp"), [{"t": "fp", "fp": new_fp}])
-        self.assertIn("du har ändrat kanaler eller plugins, spara för att dela", self.fl.project.hints[-1])
+        self.assertIn("kanalerna pausade, spara för att dela din ändring", self.fl.project.hints[-1])
         self.fl.set_volume(2, 0.5)
         self.tick(3)
-        self.assertEqual(self.sent_batches(), [])
+        batch, = self.sent_batches()
+        self.assertEqual(batch["kv"], [["m/2/v", 0.5]])  # the mixer still syncs: only the channels changed
         # Saving shares it: the relay announces our snapshot and asks for our values.
         self.link.incoming.append({"t": "snapshot", "v": 1, "name": "Beat", "fp": new_fp, "by": "A", "from": "c1"})
         self.link.incoming.append({"t": "reshare"})
         self.tick(10)
         batches = self.sent_batches()
-        self.assertFalse(any(b.get("seed") for b in batches))
+        self.assertTrue(all(b.get("seed") for b in batches))  # starting values: a change made meanwhile wins
         self.assertTrue(all(b["fp"] == new_fp for b in batches))
         self.assertIn(("m/2/v", 0.5), self.pairs(batches))
         self.assertIn(("c/4/n", "Perc"), self.pairs(batches))
@@ -405,10 +411,12 @@ class ClientTest(unittest.TestCase):
         new_fp = self.other_fl_with_an_extra_channel()
         self.link.incoming.append({"t": "snapshot", "v": 2, "name": "Beat", "fp": new_fp, "by": "Kim", "from": "c2",
                                    "path": "C:\\Projects\\FLSync\\Beat\\Beat.flp"})
-        self.wait_for_hint("FLSync pausad: öppna Kims version av projektet")
-        self.link.incoming.append({"t": "sets", "from": "c2", "kv": [["m/4/v", 0.1]], "s": 3})
+        self.wait_for_hint("pausade, öppna Kims version av projektet")
+        self.link.incoming.append({"t": "sets", "from": "c2", "kv": [["m/4/v", 0.1], ["c/1/n", "Kims"]], "s": 3})
         self.tick(5)
-        self.assertEqual(self.fl.volume(4), 0.8)
+        channels = self.fl.project.modules["channels"]
+        self.assertEqual(self.fl.volume(4), 0.1)  # the mixer is the same in both: it syncs
+        self.assertNotEqual(channels.getChannelName(1, 1), "Kims")  # the channels aren't
         # Opening it: a project load that gives us the same structure.
         midi = self.fl.project.modules["midi"]
         self.client.project_load(midi.PL_Start)
@@ -416,9 +424,9 @@ class ClientTest(unittest.TestCase):
         self.client.project_load(midi.PL_LoadOk)
         self.assertEqual(self.link.take("fp"), [{"t": "fp", "fp": new_fp, "load": True}])
         self.assertEqual(len(self.link.take("sync")), 1)
-        self.link.incoming.append({"t": "state", "state": {"m/4/v": 0.1}, "s": 4})
+        self.link.incoming.append({"t": "state", "state": {"c/1/n": "Kims"}, "s": 4})
         self.tick(10)
-        self.assertEqual(self.fl.volume(4), 0.1)
+        self.assertEqual(channels.getChannelName(1, 1), "Kims")
         self.assertEqual(self.fl.project.hints[-1], "FLSync: synkar igen")
 
     def test_a_snapshot_with_our_structure_keeps_us_in_sync(self):
@@ -442,7 +450,7 @@ class ClientTest(unittest.TestCase):
         self.tick(3)
         batches = self.sent_batches()
         self.assertTrue(batches)
-        self.assertTrue(all(b["fp"] == new_fp and not b.get("seed") for b in batches))
+        self.assertTrue(all(b["fp"] == new_fp and b.get("seed") for b in batches))
 
     def test_a_refused_batch_stops_being_pending(self):
         self.join(peers=[self.KIM])
@@ -460,8 +468,38 @@ class ClientTest(unittest.TestCase):
         self.add_channel()
         self.client.project_load(midi.PL_LoadOk)
         self.assertEqual(len(self.link.take("fp")), 1)
-        self.assertEqual(self.link.take("sync"), [])
-        self.wait_for_hint("FLSync pausad: öppna samma projekt som de andra")
+        # The session's values that still fit (tempo, play, or the part of the
+        # structure that is the same) are taken; the rest are left out.
+        self.assertEqual(self.link.take("sync"), [{"t": "sync"}])
+        self.wait_for_hint("kanalerna pausade, öppna samma projekt som de andra")
+
+    def test_a_tick_long_after_the_last_is_fl_busy_not_the_bridge_gone(self):
+        self.join(peers=[self.KIM])
+        forgiven = []
+        self.link.forgive = forgiven.append
+        self.tick(seconds=5.0)  # FL was loading a plugin: no callbacks at all meanwhile
+        self.assertEqual(forgiven, [self.now])
+        self.assertTrue(self.client.joined)
+        logs = [m["data"] for m in self.link.take("log")]
+        self.assertIn("FL var upptaget i 5.0 s", logs)  # for FLSync's log, so stalls can be measured
+
+    def test_events_lost_on_the_way_bring_the_sessions_values_again(self):
+        self.join(peers=[self.KIM])
+        self.link.take("sync")
+        self.link.stats = {"gaps": 1}
+        self.tick()
+        self.assertEqual(self.link.take("sync"), [{"t": "sync"}])
+        self.link.stats = {"gaps": 2}
+        self.tick()
+        self.assertEqual(self.link.take("sync"), [])  # at most once per RESYNC_INTERVAL
+
+    def test_what_fl_offers_is_logged_once(self):
+        self.join()
+        logs = [m["data"] for m in self.link.take("log")]
+        self.assertEqual(len([text for text in logs if text.startswith("funktioner i FL: ")]), 1)
+        self.assertIn("ilmcp finns inte", [text for text in logs if text.startswith("funktioner")][0])
+        self.tick(5)
+        self.assertFalse(any(m["data"].startswith("funktioner") for m in self.link.take("log")))
 
     def test_swedish_genitive(self):
         genitive = self.fl.script.flsync_client._genitive
@@ -498,7 +536,7 @@ class ClientTest(unittest.TestCase):
     def test_an_opened_version_counts_as_its_structure_even_with_a_plugin_missing(self):
         theirs = "0123456789ab"  # what the version reads as on Kim's computer (with the plugin)
         self.join(peers=[self.KIM], fp=theirs)
-        self.wait_for_hint("FLSync pausad")
+        self.wait_for_hint("pausade")
         self.link.incoming.append({"t": "loaded", "v": 3, "fp": theirs})  # the bridge saw us open version 3
         self.tick(10)
         self.assertEqual(self.link.take("fp"), [{"t": "fp", "fp": theirs, "load": True}])  # no pen for opening
@@ -511,7 +549,7 @@ class ClientTest(unittest.TestCase):
         self.add_channel()
         self.tick(25)
         self.assertEqual(self.link.take("fp"), [{"t": "fp", "fp": self.structure()}])
-        self.assertIn("du har ändrat kanaler eller plugins", self.fl.project.hints[-1])
+        self.assertIn("spara för att dela din ändring", self.fl.project.hints[-1])
 
     def test_a_project_load_ends_the_alias(self):
         self.join(peers=[self.KIM], fp="0123456789ab")
@@ -594,7 +632,7 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(self.link.take("fp"), [{"t": "fp", "fp": self.structure()}])
         self.tick(40)
         self.assertEqual(self.sent_batches(), [])  # not m/3/n = "Spår 4", c/3/t = 3, ...
-        self.assertIn("du har ändrat kanaler eller plugins", self.fl.project.hints[-1])
+        self.assertIn("mixern pausad, spara för att dela din ändring", self.fl.project.hints[-1])
 
     def test_others_values_still_waiting_are_dropped_when_inserts_get_other_numbers(self):
         self.name_inserts()
@@ -722,8 +760,10 @@ class ClientTest(unittest.TestCase):
                                    "kv": [["m/2/v", 0.25], ["x/val", 5], ["m/4/v", 0.5]]})
         self.script_tick()
         self.assertEqual((self.fl.volume(2), self.fl.volume(4)), (0.25, 0.5))
-        self.assertEqual(self.fl.script._errors, 1)  # still counted and logged
-        self.assertTrue(any("trasig binding" in line for line in self.fl.logs))
+        # Logged, but not counted against the script: an area of FL that refuses
+        # for a while (a plugin loading) mustn't turn FLSync off.
+        self.assertEqual(self.fl.script._errors, 0)
+        self.assertTrue(any("fel i x/" in line and "trasig binding" in line for line in self.fl.logs))
         self.tick(5)
         self.assertEqual(self.sent_batches(), [])
 

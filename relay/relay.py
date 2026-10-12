@@ -66,6 +66,12 @@ SESSION_FORMAT = 1
 KEEP_VERSIONS = 20       # ...the older versions kept there besides the newest
 APPS = ("fl", "monitor")
 FILES = "files"          # the app of a bridge's files connection
+NOTE_KINDS = ("unrelated",)  # what a `note` may tell the others
+# Which part of FL's structure fingerprint a key depends on (docs/protocol_v2.md,
+# "Structure"): its 12 hex digits are the channels' 6, then the mixer's 6. Keys
+# of other prefixes (song, transport, playlist tracks, patterns) depend on neither.
+KEY_AREAS = {"c": "c", "g": "c", "gp": "c", "pc": "c", "m": "m", "mx": "m", "mr": "m", "pm": "m"}
+AREA_PARTS = {"c": slice(0, 6), "m": slice(6, 12)}
 HASH = re.compile(r"[0-9a-f]{64}\Z")
 _MISSING = object()      # the value of a single set that has none
 
@@ -106,6 +112,24 @@ def valid_value(value):
 
 def valid_fp(fp):
     return isinstance(fp, str) and 0 < len(fp) <= MAX_FP
+
+
+def key_area(key):
+    """The part of the structure a key's thing is found by ("c" channels, "m"
+    the mixer), or None: it means the same in every structure."""
+    return KEY_AREAS.get(key.split("/", 1)[0]) if isinstance(key, str) else None
+
+
+def parts_differ(a, b, area):
+    """Whether structures `a` and `b` differ where keys of `area` point. Unknown
+    on either side never counts as another; a fingerprint that isn't FL's two
+    parts differs as a whole."""
+    if a is None or b is None or a == b or area is None:
+        return False
+    if len(a) != 12 or len(b) != 12:
+        return True
+    part = AREA_PARTS[area]
+    return a[part] != b[part]
 
 
 def valid_hash(h):
@@ -428,13 +452,13 @@ class Relay:
         self.clients.pop(client.id, None)
         self._broadcast(dict(client.info(), t="peer_leave"))
         log("%s lämnade, %d kvar" % (client.name, len(self.clients)))
+        if self.pen == client.id:
+            self._free_pen()
         if self.seeder == client.id:
             self.seeder = None
             if not self.seeded:
                 self._hand_over()  # they left before sharing their project: ask the next FL instead
                 return
-        if self.pen == client.id:
-            self._free_pen()
         if client.app == "fl":
             self._adopt_lone_fl()
 
@@ -483,6 +507,8 @@ class Relay:
             self._snap_put(client, msg)
         elif kind == "notes_put":
             self._notes_put(client, msg)
+        elif kind == "note":
+            self._note(client, msg)
         elif kind == "ping":
             client.pinged = True  # from now on, a long silence means it's gone (_watch_idle)
             self._send(client, {"t": "pong"})
@@ -500,12 +526,19 @@ class Relay:
                                 % (len(pairs), MAX_BATCH)})
             return
         number = echo(number)
+        stale = []
         if self._differs(fp):
-            # Made for another structure: its keys would land on the wrong things.
-            self._send(client, {"t": "ack", "l": number, "s": self.seq, "stale": True})
-            if self.verbose:
-                log("%s: en sats för en annan projektstruktur togs inte emot" % client.name)
-            return
+            # Made for another structure: keys of the part that differs would land
+            # on the wrong things. The others (tempo, or the mixer when only the
+            # channels differ) mean the same, and are taken.
+            stale = [pair for pair in pairs if isinstance(pair, list) and pair
+                     and parts_differ(fp, self.fp, key_area(pair[0]))]
+            if len(stale) == len(pairs):
+                self._send(client, {"t": "ack", "l": number, "s": self.seq, "stale": True})
+                if self.verbose:
+                    log("%s: en sats för en annan projektstruktur togs inte emot" % client.name)
+                return
+            pairs = [pair for pair in pairs if pair not in stale]
         rejects, kept, accepted = [], [], []
         for pair in pairs:
             problem = pair_problem(pair)
@@ -529,7 +562,10 @@ class Relay:
             self._send(client, reject)
         if kept:
             self._send(client, {"t": "keep", "l": number, "kv": kept})
-        self._send(client, {"t": "ack", "l": number, "s": self.seq})
+        ack = {"t": "ack", "l": number, "s": self.seq}
+        if stale:
+            ack["stale"] = [echo(pair[0]) for pair in stale]  # these keys were refused, the rest taken
+        self._send(client, ack)
         if accepted:
             self._broadcast({"t": "sets", "from": client.id, "kv": accepted, "s": self.seq},
                             skip=client.id)
@@ -568,14 +604,20 @@ class Relay:
         elif client.app == "fl":
             self._update_pen(client, load)
 
-    def _restructure(self, fp, why):
-        """The session gets another structure. Values and notes for the old one
-        would land on the wrong things, so they go; whoever brought the new
-        structure shares its values again."""
-        self.fp = fp
-        self.state = {}
-        self.touched = set()
-        self.notes = {}
+    def _restructure(self, fp, why, keep=True):
+        """The session gets another structure. Values and notes for the part
+        that changed would land on the wrong things, so they go (all of them
+        when not `keep`: another project); whoever brought the new structure
+        shares its values again."""
+        old, self.fp = self.fp, fp
+        keep = keep and old is not None  # values made for an unknown structure can't be told apart
+        if keep:
+            self.state = {k: v for k, v in self.state.items() if not parts_differ(old, fp, key_area(k))}
+            self.touched = {k for k in self.touched if k in self.state}
+        else:
+            self.state, self.touched = {}, set()
+        if not keep or parts_differ(old, fp, "c"):
+            self.notes = {}  # they are a channel's
         self.seeded, self.seeder = False, None
         if self.snapshot is not None and self.snapshot.get("fp") != fp:
             self.snapshot = None  # a version of another structure: not one to hand to newcomers
@@ -592,6 +634,8 @@ class Relay:
         starts changing the structure and nobody has it, and gives it back when
         its structure is the session's again. A structure that comes from
         opening a project (`load`) isn't a change in the making: no pen."""
+        if self.pen is not None and self.pen not in self.clients:
+            self.pen = None  # its holder left without giving it back
         if self._differs(client.fp):
             if load:
                 return
@@ -643,9 +687,10 @@ class Relay:
             # On disk before anyone hears of it: a restarted relay never hands out its number again.
             self.kept = [snapshot] + self.kept[:KEEP_VERSIONS]
             self._write_session()
-        changed = snapshot["fp"] != self.fp
+        changed = snapshot["fp"] != self.fp or snapshot.get("switch")
         if changed:
-            self._restructure(snapshot["fp"], "%s delade ett projekt med en ny struktur" % client.name)
+            what = "bytte sessionens projekt" if snapshot.get("switch") else "delade ett projekt med en ny struktur"
+            self._restructure(snapshot["fp"], "%s %s" % (client.name, what), keep=not snapshot.get("switch"))
             if client.app == "fl":
                 self.seeder = client.id  # its `reshare` brings the values
         self._broadcast(dict({"t": "snapshot"}, **snapshot))
@@ -706,7 +751,22 @@ class Relay:
             snapshot["parent"] = parent  # the newest version it includes, 0 for none
         if merged is not None:
             snapshot["merged"] = list(merged)  # whose versions it includes besides the sharer's own
+        if msg.get("switch") is True:
+            snapshot["switch"] = True  # another project than the session's: nobody merges it with theirs
         return snapshot, None
+
+    def _note(self, client, msg):
+        """Something the others should hear about an FL (docs/protocol_v2.md):
+        passed on, never kept. `unrelated`: it saved a project that isn't the
+        session's, which isn't shared unless it saves again soon."""
+        kind, name = msg.get("kind"), msg.get("name")
+        if kind not in NOTE_KINDS or not isinstance(name, str) or not 0 < len(name) <= MAX_NAME:
+            self._send(client, {"t": "error", "msg": "note ska ha kind (%s) och name" % ", ".join(NOTE_KINDS)})
+            return
+        self._broadcast({"t": "note", "kind": kind, "name": name, "from": client.id, "by": client.name},
+                        skip=client.id)
+        log("%s sparade '%s', som inte är sessionens projekt: det delas om hen sparar igen inom kort"
+            % (client.name, name))
 
     def _notes_put(self, client, msg):
         pattern, channel, ppq, notes = msg.get("p"), msg.get("c"), msg.get("ppq"), msg.get("notes")

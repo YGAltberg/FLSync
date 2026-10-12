@@ -83,6 +83,16 @@ def _beats(ticks):
     return round(ticks / _ppq(), 4)
 
 
+def _swing():
+    """(get, set) of the channel rack's main swing, 0..1: FL 2026's
+    channels.getSwing/setSwing, or getShuffle/setShuffle as API 42 was
+    documented. None if this FL has neither."""
+    for get, put in (("getSwing", "setSwing"), ("getShuffle", "setShuffle")):
+        if hasattr(channels, get) and hasattr(channels, put):
+            return getattr(channels, get), getattr(channels, put)
+    return None
+
+
 class SongBinding(Binding):
     """Tempo, time signature numerator, pattern/song mode and play/stop."""
 
@@ -108,8 +118,14 @@ class SongBinding(Binding):
         num = numerator()
         if num is not None:
             yield "s/num", num
-        if hasattr(channels, "getShuffle"):  # the main swing: FL 2026 (API 42) and later
-            yield "s/swing", round(channels.getShuffle(), 4)
+        swing = _swing()
+        if swing is not None:
+            try:
+                level = round(swing[0](), 4)
+            except (TypeError, ValueError):  # not now, or this FL's function wants something else
+                level = None
+            if level is not None:
+                yield "s/swing", level
         yield "s/loop", int(transport.getLoopMode())
         playing = self._is_playing()
         if playing != self.playing:  # pressed play or stop here
@@ -153,11 +169,11 @@ class SongBinding(Binding):
             general.setNumerator(int(value))
             return int(value)  # getRecPPB() may show it a moment later
         if key == "s/swing":
-            level = _number(value)
-            if level is None or not hasattr(channels, "setShuffle"):
+            level, swing = _number(value), _swing()
+            if level is None or swing is None:
                 return None
-            channels.setShuffle(min(1.0, max(0.0, level)))
-            return round(channels.getShuffle(), 4)
+            swing[1](min(1.0, max(0.0, level)))
+            return round(swing[0](), 4)
         if key == "s/loop":
             if value not in (0, 1):
                 return None

@@ -62,7 +62,7 @@ Varje gång du sparar jämför FLSync tre versioner: den du utgick från, den du
 
 FLSync skriver aldrig över dina egna filer. Sessionens projekt ligger i `Dokument\Image-Line\FL Studio\Projects\FLSync\<namn>\`, och där sparar FL sedan. Varje version som ersätts där kopieras först till `Versioner` (de 20 senaste sparas). Rattar, steg och plugin-inställningar är redan lika hos alla, eftersom de synkas live.
 
-Ett projekt som inte hör till sessionen (du öppnade ett annat projekt) delas inte när andra är med; FLSync-fönstret erbjuder då **Dela mitt projekt**, som gör ditt projekt till sessionens.
+Ett projekt som inte hör till sessionen (du öppnade ett annat projekt) delas inte när andra är med, och de andra får veta att du sparade ett annat projekt. **Tryck Ctrl+S igen inom 15 sekunder** (eller klicka **Dela mitt projekt** i FLSync-fönstret), så blir ditt projekt sessionens: de andras FL öppnar det, och sparar de sitt gamla projekt öppnas ditt i stället för att de slås ihop.
 
 ## Om anslutningen bryts
 
@@ -80,7 +80,8 @@ FLSync är byggt för att fungera även när ni inte har exakt samma uppsättnin
 - **Du installerar en ny FL-version** (t.ex. FL Studio 2026). Starta den en gång och stäng den: har du FLSync igång ställer det in den nya FL-versionen så fort den är stängd (FLSync-fönstret säger till), annars gör Start-menyn > *Reparera FLSync* det. FLSync känner av vilken FL du kör.
 - **Egna samples.** Samples från dina egna mappar skickas med och läggs i projektets mapp hos de andra, med projektets sökvägar ändrade dit. FL:s egna samples finns redan hos alla. Samma sample skickas bara en gång.
 - **Två ändrar strukturen samtidigt.** Den som först lägger till eller tar bort en kanal eller ett plugin tar "pennan", och de andra ser i hint-raden att `Anna ändrar projektets struktur`. Ändrar någon annan också, varnar FLSync: lägger ni båda till kanaler går versionerna inte att slå ihop, och den som sparar sist ersätter den andras.
-- **Någon ändrar strukturen.** De andra pausas (`FLSync pausad: tryck Ctrl+S för att få Annas version`) tills de har den versionen. Ctrl+S slår ihop deras egna ändringar med den och öppnar resultatet.
+- **Någon ändrar strukturen.** Bara den del som ändrades pausas: ett nytt instrument pausar kanalerna, en ny effekt pausar mixern (`FLSync: kanalerna pausade, tryck Ctrl+S för att få Annas version`). Resten, och tempo, play/stop och spellistans spår, synkar som vanligt. Ctrl+S slår ihop de egna ändringarna med den nya versionen och öppnar resultatet. (Skapar FL en ny mixerkanal åt instrumentet pausas mixern också.)
+- **FL hänger en stund** (laddar ett plugin eller ett projekt, sparar, visar en dialogruta). FL stannar kvar i sessionen så länge FL-fönstret finns, och det de andra ändrat under tiden kommer fram när FL svarar igen. Först efter två minuter utan svar lämnar FL sessionen, och då ansluter det igen av sig självt när det svarar.
 - **Någon har ett annat projekt öppet, eller ansluter sent.** Har hens FL inga osparade ändringar öppnas sessionens version direkt; annars pausas hen tills den är öppnad (*Öppna senaste versionen*).
 - **Någon lämnar.** Den som blir ensam kvar fortsätter med sitt projekt som sessionens.
 
@@ -108,12 +109,12 @@ Ditt namn och den senaste inbjudan sparas i `%LOCALAPPDATA%\FLSync\settings.json
 ## Krav
 
 - **Windows 10 eller 11.** macOS stöds inte än (MIDI-delen bygger på Windows).
-- **FL Studio 2025 eller 2026.** Allt är testat mot 2025.2.4 (script-API 40) och använder bara det som finns i båda; swing synkas från FL 2026. Kanalracket kräver API 33 och plugin-parametrarna API 26.
+- **FL Studio 2025 eller 2026.** Allt är testat mot 2025.2.4 (script-API 40) och använder bara det som finns i båda; swing synkas i FL 2026. Kanalracket kräver API 33 och plugin-parametrarna API 26.
 - **Samma plugins** från andra tillverkare hos alla som ska höra dem (se [När datorerna skiljer sig](#när-datorerna-skiljer-sig)).
 
 ## Kända begränsningar
 
-- **Innehåll synkas inte live.** Nya kanaler, plugins, samples, klipp och automation kommer fram när någon sparar (Ctrl+S). FL laddar då om projektet, så ångra-historiken börjar om; FLSync väntar tills du har stoppat uppspelningen.
+- **Innehåll synkas inte live.** Nya kanaler, plugins, samples, klipp i spellistan och automation kommer fram när någon sparar (Ctrl+S). FL laddar då om projektet, så ångra-historiken börjar om; FLSync väntar tills du har stoppat uppspelningen. Det går inte att göra live: FL:s script-API (även i FL 2026) kan inte läsa eller lägga klipp i spellistan, lägga till kanaler eller ladda plugins.
 - **Sammanslagningen** behåller din ändring där ni båda ändrat samma kanal, mönsterinställning eller mixerkanal (noter och klipp slås ihop ett och ett). Det här går inte att slå ihop: att ni båda lägger till kanaler, att någon tar bort eller flyttar kanaler, mönster eller mixerkanaler, att någon lägger till mixerkanaler, och versioner sparade i olika FL-versioner. Då ersätter den senaste sparningen den förra (som finns kvar i `Versioner`), och båda får veta det.
 - **Noter** går bara när någon kör notscripten. FLSync antar att pianorullen visar den kanal som är vald i kanalracket.
 - **Två olika projekt med samma filnamn** (t.ex. två `Beat.flp` i olika mappar) kan FLSync blanda ihop när du öppnar det andra under en session. FL visar bara filnamnet, så FLSync ser vilken mapp först när FL sparar. Byt namn på det ena (*File → Save as*) om du byter projekt mitt i en session.
@@ -134,8 +135,9 @@ Börja med FLSync-fönstret: det känner igen de flesta problem och säger vad d
 - **FLSync saknas i FL:s MIDI-inställningar (Controller type):** starta om FL efter installationen.
 - **FL hörs inte:** porten `FLSync` måste finnas innan FL startar. Starta loopMIDI, stäng FL och starta det igen. Välj Start-menyn > *Reparera FLSync* om det inte hjälper.
 - **Inget fönster öppnas när jag dubbelklickar på FLSync:** FLSync körs kanske redan, då kommer fönstret fram. Annars står felet i `%LOCALAPPDATA%\FLSync\flsync.log`. Saknar datorn både Edge och Chrome öppnas FLSync i webbläsaren i stället.
-- **`FLSync pausad`:** ditt projekt har inte samma kanaler och plugins som sessionens. Hint-raden säger om du ska spara eller öppna någon annans version.
-- **Projektet delas inte när jag sparar:** FLSync ser vilken fil FL skriver när du trycker Ctrl+S (namnet står i FL:s fönsterrubrik). Ett nytt projekt måste sparas som fil först, på en lokal disk (inte en nätverksenhet). Står det att projektet inte hör till sessionen: öppna sessionens version, eller klicka *Dela mitt projekt* i FLSync-fönstret.
+- **`FLSync: kanalerna pausade`** (eller mixern): ditt projekt har inte samma kanaler eller plugins som sessionens där. Hint-raden säger om du ska spara eller öppna någon annans version. Resten synkar under tiden.
+- **Projektet delas inte när jag sparar:** FLSync ser vilken fil FL skriver när du trycker Ctrl+S (namnet står i FL:s fönsterrubrik). Ett nytt projekt måste sparas som fil först, på en lokal disk (inte en nätverksenhet). Står det att projektet inte hör till sessionen: öppna sessionens version, eller tryck Ctrl+S igen inom 15 sekunder (eller *Dela mitt projekt* i FLSync-fönstret) för att göra ditt projekt till allas.
+- **Vad hände?** FLSync-fönstrets logg visar också FL:s egna meddelanden: när FL var upptaget och hur länge, fel i en del av FL och varför synken pausades.
 - **Notscripten säger att FLSync inte är igång:** starta FLSync. Scripten läser dess fil i `%LOCALAPPDATA%\FLSync\notes`.
 - **`Öppna senaste versionen` öppnade ett nytt FL-fönster:** stäng det nya och öppna filen via *File → Open* i det FL du redan har igång. FLSync visar var filen ligger (*Visa i mappen*).
 - **Något i installationen har gått sönder** (t.ex. porten eller FL:s MIDI-inställningar): Start-menyn > *Reparera FLSync*.
@@ -156,7 +158,7 @@ FL låter inte script öppna nätverksanslutningar eller filer. Scriptet i FL pr
 - **Konflikter:** tills din egen senaste ändring av ett värde är kvitterad ignorerar scriptet andras ändringar av samma värde. Din ändring ligger senare i relayns ordning och vinner hos alla.
 - **Inga ekon:** när scriptet har skrivit in någon annans värde sparar det värdet som FL faktiskt behöll (FL avrundar), så det skickas aldrig tillbaka.
 - **Startvärden:** den första FL som ansluter delar sina inställningar. Om någon hinner ändra ett värde medan de är på väg skriver relayn inte över ändringen.
-- **Struktur:** scriptet räknar ut ett fingeravtryck av projektets kanaler, mixerspår och plugins. Värden går bara mellan FL med samma struktur, så att ett värde aldrig hamnar på fel kanal. När en sparad version ändrar strukturen börjar relayn om med den versionens värden. När du har öppnat en version räknas din struktur som den versionens, även om ett plugin saknas hos dig.
+- **Struktur:** scriptet räknar ut ett fingeravtryck i två delar, av projektets kanaler och av mixerns spår och plugins. Ett värde går bara mellan FL där dess del är lika, så att ett värde aldrig hamnar på fel kanal; värden som tempo och play gäller alla. När en sparad version ändrar strukturen börjar relayn om med den versionens värden för den del som ändrades. När du har öppnat en version räknas din struktur som den versionens, även om ett plugin saknas hos dig.
 - **Projektversioner:** FLSync bevakar projektfilen. När FL har sparat den läser FLSync vilka samples den använder, laddar upp det relayn inte redan har och meddelar sessionen. Mottagarna hämtar det som saknas till sin cache (`%LOCALAPPDATA%\FLSync\cache`) och skriver projektmappen i `Dokument\Image-Line\FL Studio\Projects\FLSync\<namn>\`.
 - **Sammanslagning:** en .flp är en lång rad händelser. FLSync delar upp den i delar (mönstrens noter, kanaler, mönsterinställningar, arrangemang, spellistans klipp, spår, mixerkanaler, mixerparametrar) och jämför varje del i tre versioner: den gemensamma utgångspunkten, din och den senaste. Noter och klipp jämförs ett och ett. Varje delning anger vilken version den bygger på, och relayn tar bara emot den om det fortfarande är den senaste; annars slås den ihop igen med den nyare.
 - **Bortkopplad:** bryggan och relayn skickar `ping` till varandra, så en tyst anslutning märks inom 20 sekunder. Scriptet i FL minns vad du ändrar medan det är bortkopplat och skickar det när det är tillbaka, utom det som någon annan har ändrat under tiden.

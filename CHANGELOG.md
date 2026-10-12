@@ -1,5 +1,16 @@
 # Ändringar
 
+## 0.10.0 – stabilare session
+
+Efter det första riktiga testet på två datorer:
+
+- **FL som hänger stannar kvar.** När FL laddar ett plugin eller ett projekt, sparar eller visar en dialogruta svarar det inte på några sekunder. Förut lämnade FLSync då sessionen, och ibland kom FL aldrig tillbaka in utan att märka det. Nu stannar FL kvar så länge fönstret finns, och det de andra ändrat under tiden kommer fram när FL svarar igen.
+- **Ett nytt plugin pausar inte allt.** Ett nytt instrument pausar bara kanalerna och en ny effekt bara mixern. Tempo, play/stop och spellistans spår synkar alltid. Det som pausats kommer tillbaka när ändringen sparas och delas, som förut.
+- **Ett plugin som laddar kan inte stänga av FLSync.** Krånglar en del av FL en stund fortsätter resten, och felet skrivs i loggen i stället för att räknas mot FLSync.
+- **Byta projekt:** sparar du ett projekt som inte är sessionens får de andra veta det. Tryck Ctrl+S igen inom 15 sekunder, så blir det allas projekt och öppnas hos de andra. Deras gamla projekt slås aldrig ihop med det nya.
+- **Swing synkas i FL 2026** (funktionen heter `getSwing` där).
+- **FL:s egna meddelanden hamnar i FLSync-fönstrets logg:** när FL var upptaget och hur länge, fel och pauser, och vilka funktioner FL erbjuder skript.
+
 ## 0.9.0 – första versionen
 
 Allt som behövs för att spela i samma FL Studio-projekt, var och en i sin egen FL:

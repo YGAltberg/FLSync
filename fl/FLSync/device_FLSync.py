@@ -94,11 +94,23 @@ def _run(method, *args):
             _errors, _errors_since = 0, now
         _errors += 1
         if _errors == 1 or _client.debug:
-            log("fel:\n" + traceback.format_exc())
+            text = traceback.format_exc()
+            log("fel:\n" + text)
+            _tell_bridge("fel: " + text.strip().splitlines()[-1][:200])
         if _errors >= MAX_ERRORS:
             log("för många fel, FLSync stängs av. Ladda om scriptet när felet är åtgärdat.")
+            _tell_bridge("för många fel, FLSync stängs av i FL tills scriptet laddas om")
             _client = None
         return None
+
+
+def _tell_bridge(text):
+    """Put `text` in FLSync's log too (the bridge writes it there)."""
+    try:
+        _client.link.send({"t": "log", "data": text})
+        _client.link.flush()
+    except Exception:
+        pass
 
 
 def OnInit():

@@ -16,8 +16,13 @@ class FakeLink:
         self.incoming = []
         self.sent = []
 
+    stats = {"gaps": 0}  # MidiLink's counters the client reads
+
     def alive(self, now):
         return True
+
+    def forgive(self, now):
+        pass
 
     def can_send(self):
         return True
@@ -108,6 +113,22 @@ class SongBindingTest(SongTestCase):
         self.assertEqual(self.s.write("s/swing", 7), 1.0)
         self.assertIsNone(self.s.write("s/swing", "mycket"))
         self.assertEqual(self.s.describe("s/swing"), "Swing")
+
+    def test_swing_has_fl_2026s_names(self):
+        channels = self.fl.project.modules["channels"]
+        swing = {"value": 0.25}
+        channels.getSwing = lambda: swing["value"]  # what FL 2026.1.7's engine has (no getShuffle)
+        channels.setSwing = lambda value: swing.update(value=value)
+        self.assertEqual(self.read()["s/swing"], 0.25)
+        self.assertEqual(self.s.write("s/swing", 0.5), 0.5)
+
+        def refuses():
+            raise TypeError("Operation unsafe at current time")
+        channels.getSwing = refuses
+        values = self.read()
+        self.assertNotIn("s/swing", values)  # only swing is left out: tempo and play still sync
+        self.assertIn("s/tempo", values)
+        self.assertIn("s/play", values)
 
     def test_a_numerator_fl_does_not_report_whole_is_left_out(self):
         self.fl.project.modules["general"].getRecPPB = lambda: PPQ * 7 // 2

@@ -433,8 +433,13 @@ class RelayLink:
     def deliver(self, msg):
         self.incoming.append(json.loads(json.dumps(msg)))
 
+    stats = {"gaps": 0}  # MidiLink's counters the client reads
+
     def alive(self, now):
         return True
+
+    def forgive(self, now):
+        pass
 
     def can_send(self):
         return True

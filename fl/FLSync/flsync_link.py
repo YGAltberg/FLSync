@@ -42,6 +42,12 @@ class MidiLink:
     def alive(self, now):
         return self.last_heard is not None and now - self.last_heard < LINK_TIMEOUT
 
+    def forgive(self, now):
+        """FL itself was busy and heard nothing meanwhile: the silence was ours,
+        not the bridge's, so the bridge gets LINK_TIMEOUT from now to be heard."""
+        if self.last_heard is not None:
+            self.last_heard = max(self.last_heard, now)
+
     def can_send(self):
         return bool(device.isAssigned())  # needs an output port linked to the script
 

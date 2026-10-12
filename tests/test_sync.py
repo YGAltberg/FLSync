@@ -6,9 +6,10 @@ real bridges, which talk to a real relay over TCP (protocol v1).
 
 import time
 import unittest
+from unittest import mock
 
 from fake_fl import FakeFL
-from harness import BridgeLink, LoopThread, RawClient, RelayServer, free_port, pump
+from harness import BridgeLink, LoopThread, RawClient, RelayServer, bridge_mod, free_port, pump
 
 
 def shared_keys(fl):
@@ -250,6 +251,38 @@ class SyncTest(unittest.TestCase):
         a, b = self.session()
         a.to_bridge = None  # FL stops sending, e.g. it was closed
         self.wait_for(lambda: not b.client.peers, timeout=8)
+
+    def test_a_busy_fl_stays_in_the_session(self):
+        a, b = self.session()
+        a.window_open = b.window_open = True  # FL's window is there: it is busy (a plugin loading), not closed
+        # (Longer than the script's 1 s heartbeat: B's bridge must not take B for busy.)
+        with mock.patch.object(bridge_mod, "FL_TIMEOUT", 1.5):
+            self.fls.remove(a)  # FL does nothing at all meanwhile, not even its script
+            self.settle(4)      # longer than the script's own link timeout too
+            self.assertTrue(b.client.peers)
+            b.set_volume(5, 0.3)
+            self.settle(0.3)
+            self.fls.append(a)
+            self.wait_for(lambda: a.volume(5) == 0.3, timeout=15)
+        logs = self.bridges[a].logs
+        self.assertTrue(any("stannar kvar i sessionen" in line for line in logs))
+        self.assertTrue(any("FL svarar igen" in line for line in logs))
+        self.assertFalse(any("lämnar relayn" in line for line in logs))
+        self.assertTrue(any("FL var upptaget" in line for line in a.logs))
+        self.assertFalse(any("tappade kontakten med bryggan" in line for line in a.logs))
+
+    def test_an_fl_gone_for_too_long_joins_again_when_it_is_back(self):
+        a, b = self.session()
+        a.window_open = b.window_open = True
+        with mock.patch.object(bridge_mod, "FL_TIMEOUT", 1.5), mock.patch.object(bridge_mod, "FL_GONE", 3.0):
+            self.fls.remove(a)
+            self.wait_for(lambda: not b.client.peers, timeout=8)
+            # FL hears the bridge's heartbeats first and would think it is still
+            # in the session: the bridge tells it otherwise.
+            self.fls.append(a)
+            self.wait_for(lambda: b.client.peers and a.client.joined, timeout=15)
+        b.set_volume(6, 0.45)
+        self.wait_for(lambda: a.volume(6) == 0.45, timeout=15)
 
     def test_without_a_bridge_fl_just_waits(self):
         lonely = self.fl("Ensam", bridge=False)

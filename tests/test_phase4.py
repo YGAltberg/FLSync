@@ -309,6 +309,35 @@ class MergeOnSaveTest(snaps.Session):
         self.assertEqual((self.relay.version, self.relay.snapshot["name"]), (2, "Egen"))
         self.assertFalse(cy.bridge.unrelated)
 
+    def test_saving_a_project_that_isnt_the_sessions_again_makes_it_everyones(self):
+        self.start()
+        mine = snaps.save(os.path.join(self.tmp, "Cy", "Egen.flp"), self.song)
+        an_hour_ago = time.time() - 3600
+        os.utime(mine, (an_hour_ago, an_hour_ago))
+        cy_fl, cy = self.person("Cy", project=mine)
+        self.wait_for(lambda: cy.bridge.identifying is not None and cy.bridge.identifying.done())
+        snaps.save(mine, touch(retitle(self.song, "Cys låt"), 7))
+        answer = self.saved(cy)
+        self.assertEqual((answer["outcome"], answer["confirm"]), ("unrelated", 15))
+        # The others hear of it, so nobody wonders why nothing came.
+        self.wait_for(lambda: any(m.get("t") == "note" and m.get("by") == "Cy" for m in self.anna.sent))
+        self.assertTrue(any("som inte är sessionens projekt" in line for line in self.anna.logs))
+        snaps.save(mine, touch(retitle(self.song, "Cys låt"), 8))  # Ctrl+S again
+        answer = self.saved(cy, 2)
+        self.assertEqual(answer["outcome"], "switched", answer)
+        snapshot = self.relay.snapshot
+        self.assertEqual((self.relay.version, snapshot["name"], snapshot.get("switch")), (2, "Egen", True))
+        # Anna's FL has nothing unsaved (it never said otherwise): Cy's project opens.
+        self.wait_for(lambda: self.anna.opened, why="\n".join(self.anna.logs))
+        self.assertIsNone(self.anna.bridge.base)
+        # A save of the old project isn't merged with Cy's or shared: FL opens Cy's.
+        snaps.save(self.project, touch(rename_channel(self.song, 2, "Annas kanal"), 9))
+        answer = self.saved(self.anna, 2)  # (her first: sharing version 1)
+        self.assertEqual((answer["outcome"], answer.get("with")), ("old", ["Cy"]), answer)
+        self.settle(0.3)
+        self.assertEqual(self.relay.version, 2)
+        self.assertEqual(len(self.anna.opened), 2)
+
     def test_versions_from_another_fl_version_are_merged_in_your_own(self):
         self.start()
         snaps.save(self.project, touch(set_version(rename_channel(self.song, 2, "Annas kanal"), "26.1.7.5653"), 2))

@@ -108,6 +108,7 @@ class BridgeLink:
             "mru": lambda: None,
             "mru_all": lambda: [],    # never the real FL's recent files ...
             "fl_title": lambda: None,  # ... or window title (a real FL may run meanwhile)
+            "fl_open": lambda: getattr(fl, "window_open", False),  # FL's window: closed unless a test opens it
             "cache_dir": os.path.join(self.folder, "cache"),
             "projects_dir": os.path.join(self.folder, "Projects", "FLSync"),
             "notes_dir": os.path.join(self.folder, "notes"),

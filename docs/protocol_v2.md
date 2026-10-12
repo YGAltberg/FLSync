@@ -296,6 +296,42 @@ disconnects lose nothing):
   merges it in) or `"open"` (FL's project isn't one the bridge can merge: open
   the version), and `merged` (names).
 
+## 0.10 additions
+
+Additive; `PROTO` stays 2. Older peers keep working, they just pause more.
+
+* **Two-part fingerprint.** FL's `fp` is still 12 hex digits: the first 6
+  hash the channels (type and instrument per channel), the last 6 the mixer
+  (track count and the plugin per effect slot). Keys of `c/ g/ gp/ pc/` depend
+  on the channel part, `m/ mx/ mr/ pm/` on the mixer part, all others (`s/`,
+  `pl/`, `pt/`) on neither. A fingerprint of another length differs as a
+  whole. The relay refuses only the pairs of a batch whose part differs from
+  the session's: `ack {l, s, stale: [keys]}` (or `stale: true` if all were).
+  FL sends and applies a key whenever its part matches, so a new instrument
+  pauses only the channels and a new effect only the mixer. When the session
+  takes a new structure the relay keeps the values of the parts that stayed
+  (and the notes if the channels did).
+* **`note {kind: "unrelated", name}`** (bridge -> relay): FL saved a project
+  that isn't the session's, which wasn't shared. The relay passes it to the
+  others as `note {kind, name, from, by}` and keeps nothing.
+* **Switching the session's project.** Saving such a project again within
+  15 s (or "Dela mitt projekt") shares it with `switch: true` in `snap_put`;
+  the relay keeps it in the snapshot and starts all values over. A bridge that
+  gets someone else's switch forgets FL's base, and a save of the old project
+  isn't shared or merged: `saved {outcome: "old", with, open}`, and FL opens
+  the new project. The sharer gets `saved {outcome: "switched"}`. An
+  `unrelated` answer carries `confirm: 15`.
+* **A busy FL stays.** FL's script is silent while FL loads a plugin or a
+  project, saves or shows a dialog. The bridge keeps its relay session while
+  FL's main window is open, holds its messages to FL meanwhile, and leaves
+  only after 120 s or when the window is gone. When it hears FL again after
+  having left, it sends FL `link {up: false}`, so the script joins again. The
+  script itself takes a gap of 2 s or more between its ticks for its own
+  stall (`MidiLink.forgive`), not for a lost bridge.
+* After the link lost events on the way to FL, the script asks for `sync`
+  (at most every 30 s). FL -> bridge `log {data}` lines (stalls, failing
+  areas, pauses, what the FL offers scripts) go to FLSync's log.
+
 ## Ordering and conflicts
 
 * The relay handles messages one at a time. Every accepted pair gets the next

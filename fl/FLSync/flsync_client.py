@@ -16,9 +16,11 @@ Sync model:
   * Presence: what others change shows up in FL's hint bar.
   * Structure: keys address channels and plugins by number, so values only
     flow between FLs whose projects have the same structure (fingerprint `fp`,
-    flsync_structure.py). With another structure than the session's we pause
-    and say why: save to share our structure, or open the version someone
-    else shared (a snapshot, which the bridge downloads for us). When FL
+    flsync_structure.py). It has two parts, the channels' and the mixer's:
+    where ours differs from the session's, those keys pause (the rest, and
+    song keys like tempo and play, go on) and we say why: save to share our
+    structure, or open the version someone else shared (a snapshot, which
+    the bridge downloads for us). When FL
     reports channels or mixer tracks added, deleted or moved, the structure
     is checked before anything else is sent: values that moved to other
     numbers must not go out as changes.
@@ -38,6 +40,7 @@ OnIdle when FL calls it), so each tick does a small, bounded amount of work.
 """
 
 import math
+import sys
 
 import general
 import midi
@@ -71,6 +74,14 @@ STATUS_INTERVAL = 0.25          # how often FL's unsaved-changes flag and play s
 HOLD_TIMEOUT = 10.0             # after a save, others' values wait at most this long for the bridge's `saved`
 HOLD_OPEN_TIMEOUT = 30.0        # ...and this long once it says it opens the merged version now
 LOAD_SETTLE = 3.0               # FL's changed flag settles this long after a project load: no save meanwhile
+STALL_TIME = 2.0                # this long between ticks: FL itself was busy (a plugin or project loading)
+RESYNC_INTERVAL = 30.0          # after MIDI from the bridge got lost, ask for the session's values at most this often
+ERROR_LOG_INTERVAL = 30.0       # an area that keeps failing (a plugin still loading) says so at most this often
+# The part of the structure fingerprint (flsync_structure.py) each key prefix
+# depends on: "c" the channels, "m" the mixer. Others (song, transport,
+# playlist tracks, patterns) mean the same in every structure.
+KEY_AREAS = {"c": "c", "g": "c", "gp": "c", "pc": "c", "m": "m", "mx": "m", "mr": "m", "pm": "m"}
+AREAS = (("c", "kanalerna"), ("m", "mixern"))
 _MISSING = object()
 # OnDirtyChannel flags of channels added, deleted or replaced, and of a selection (FL's midi.py values).
 _RESTRUCTURE = tuple(getattr(midi, name, value) for name, value in
@@ -110,6 +121,42 @@ def _version_tuple(text):
         return tuple(int(part) for part in str(text).split("."))
     except ValueError:
         return None
+
+
+def key_area(key):
+    return KEY_AREAS.get(key.split("/", 1)[0]) if isinstance(key, str) else None
+
+
+def parts_differ(a, b, area):
+    """Whether structures `a` and `b` differ where keys of `area` point (the
+    relay checks the same). Unknown never differs; a fingerprint that isn't
+    the two 6-digit parts differs as a whole."""
+    if a is None or b is None or a == b or area is None:
+        return False
+    if len(a) != 12 or len(b) != 12:
+        return True
+    return a[:6] != b[:6] if area == "c" else a[6:] != b[6:]
+
+
+def capabilities():
+    """What this FL offers scripts, for the bridge's log: FL and API version,
+    and whether newer functions exist (swing, globalTransport, Gopher's
+    `ilmcp` module). Only looked at, never called."""
+    parts = ["FL %s, API %s" % (fl_version() or "?", api_version())]
+    try:
+        import ilmcp
+        names = sorted(name for name in dir(ilmcp) if not name.startswith("_"))
+        parts.append("ilmcp finns: %s" % (", ".join(names)[:400] or "tom"))
+    except Exception as e:
+        parts.append("ilmcp finns inte (%s)" % e.__class__.__name__)
+    try:
+        import channels
+        found = [name for name in ("getSwing", "getShuffle") if hasattr(channels, name)]
+        parts.append("swing: %s" % (", ".join(found) or "nej"))
+    except Exception:
+        pass
+    parts.append("globalTransport: %s" % ("ja" if hasattr(transport, "globalTransport") else "nej"))
+    return "funktioner i FL: " + "; ".join(parts)
 
 
 def _safe_to_edit():
@@ -210,6 +257,10 @@ class SyncClient:
         self.offline = False     # we left a session in sync: remember what changes until we're back
         self.offline_fp = None   # our structure when we left
         self.offline_base = {}   # key -> its value before the first change made since we left
+        self.gaps = 0            # the link's count of lost events at the last look
+        self.next_resync = 0.0
+        self.failing = {}        # binding -> when its next failure may be reported
+        self.told_capabilities = False
 
     # --- driven by FL's callbacks -----------------------------------------
 
@@ -229,11 +280,25 @@ class SyncClient:
             self.tick(now)
 
     def tick(self, now):
-        self.last_tick = now
+        since, self.last_tick = now - self.last_tick, now
+        if STALL_TIME <= since < float("inf"):
+            # FL itself was busy (a plugin or project loading, a dialog): the
+            # bridge only seemed silent because we didn't listen, and it keeps
+            # us in the session meanwhile. It says so if it left after all.
+            self.link.forgive(now)
+            self._tell("FL var upptaget i %.1f s" % since)
         if self.loaded:
             self.loaded, self.saves_from = False, now + LOAD_SETTLE
         self._refresh_units()
         _each(self.link.poll(), self._handle, now)
+        gaps = self.link.stats["gaps"]
+        if gaps != self.gaps:
+            self.gaps = gaps
+            if self.joined and now >= self.next_resync:
+                # Events from the bridge got lost: a change of someone else's
+                # may be missing here. The session's values bring it back.
+                self.next_resync = now + RESYNC_INTERVAL
+                self.link.send({"t": "sync"})
         if self.hold_until is not None and now >= self.hold_until:
             self._end_hold()
             if self.debug:
@@ -319,8 +384,7 @@ class SyncClient:
             # Another project, not an edit of this one: it mustn't take the pen.
             self.link.send({"t": "fp", "fp": self.my_fp, "load": True})
         if self._other_fls():
-            if self.synced:
-                self.link.send({"t": "sync"})  # others are here: take the session's values
+            self.link.send({"t": "sync"})  # others are here: take the session's values (where they fit)
             self._update_pause("other")
         elif self.my_fp == old_fp or self.my_fp == self.session_fp:
             self.need_seed = True              # alone: this project becomes the session
@@ -347,6 +411,9 @@ class SyncClient:
         if now >= self.next_heartbeat:
             self.link.heartbeat()
             self.next_heartbeat = now + HEARTBEAT_INTERVAL
+        if not self.told_capabilities:
+            self.told_capabilities = True
+            self.link.send({"t": "log", "data": capabilities()})  # for the launcher's log only
         if now >= self.next_context:
             self.next_context = now + CONTEXT_INTERVAL
             context = self.context()
@@ -435,12 +502,14 @@ class SyncClient:
             self._on_sets(msg)
         elif kind == "ack":
             # `stale`: refused, made for another structure. Either way it's done.
-            seq = msg.get("l")
+            # A list in `stale`: only those keys were refused (the others don't
+            # depend on the part of the structure that differs).
+            seq, stale = msg.get("l"), msg.get("stale")
             batch = self.batches.pop(seq, ()) if isinstance(seq, int) and not isinstance(seq, bool) else ()
             for key, value in batch:
                 self._acknowledged(key, seq)
-                self._landed(key, seq, value, not msg.get("stale"))
-            if msg.get("stale") and self.debug:
+                self._landed(key, seq, value, not (stale is True or isinstance(stale, list) and key in stale))
+            if stale and self.debug:
                 log("relayn tog inte emot sats %s: gjord för en annan struktur" % msg.get("l"))
         elif kind == "keep":
             # Starting values of ours that arrived after someone had changed those
@@ -454,8 +523,7 @@ class SyncClient:
         elif kind == "welcome":
             self._on_welcome(msg, now)
         elif kind == "state":
-            if self.synced:  # values for another structure would land on the wrong things
-                self._queue_state(msg.get("state"))
+            self._queue_state(msg.get("state"))
         elif kind == "seed":
             self.need_seed = self.seed_initial = True
         elif kind == "snapshot":
@@ -470,9 +538,12 @@ class SyncClient:
             self._on_pen(msg)
         elif kind == "reshare":
             # Our structure is the session's now (our snapshot, or we're alone
-            # and the relay took our `fp`) and its old values are gone: send ours.
+            # and the relay took our `fp`) and its values for the part that
+            # changed are gone: send ours. As starting values: where the relay
+            # kept a value (the part that stayed) and someone changed it
+            # meanwhile, theirs wins and comes back in `keep`.
             self.session_fp = self.my_fp
-            self.need_seed, self.seed_initial = True, False
+            self.need_seed, self.seed_initial = True, True
             self._update_pause()
         elif kind == "link":
             self._relay_lost(msg.get("msg") or "relayn svarar inte", now)
@@ -484,6 +555,12 @@ class SyncClient:
             self.peers.pop(msg.get("id"), None)
             log("%s lämnade sessionen" % msg.get("name"))
             self.waiting_hint = "FLSync: %s lämnade" % msg.get("name")
+        elif kind == "note":
+            if msg.get("kind") == "unrelated":
+                log("%s sparade '%s', som inte är sessionens projekt. Det delas om hen sparar igen inom kort."
+                    % (_who(msg.get("by")), _shown(msg.get("name"))))
+                self.waiting_hint = "FLSync: %s sparade ett annat projekt (%s)" % (_who(msg.get("by")),
+                                                                                _shown(msg.get("name")))
         elif kind == "error":
             log("relayn: %s" % msg.get("msg"))
 
@@ -492,13 +569,13 @@ class SyncClient:
         return isinstance(pair, (list, tuple)) and len(pair) == 2 and isinstance(pair[0], str)
 
     def _on_sets(self, msg):
-        if not self.synced:
-            return  # made for the session's structure, which isn't ours
         sender = msg.get("from")
         for pair in msg.get("kv") or ():
             if not self._valid_pair(pair):
                 continue
             key, value = pair
+            if not self._key_ok(key):
+                continue  # made for the session's structure, which differs from ours there
             if self.debug:
                 log("<- %s = %r" % (key, value))
             if key not in self.pending:
@@ -528,7 +605,7 @@ class SyncClient:
             self.session_fp = self.session_fp or self.my_fp  # our project becomes the session's
             self.need_seed = self.seed_initial = True
         self._rejoined(msg, now)  # before the session's values are taken: what it sends isn't overwritten
-        if not msg.get("seed") and self.synced:
+        if not msg.get("seed"):
             self._queue_state(msg.get("state"))
         self._update_pause("other")
 
@@ -585,8 +662,8 @@ class SyncClient:
             return
         for key, value in state.items():
             binding = self.binding_for(key)
-            if binding is None or binding.transient(key) or key in self.pending:
-                continue
+            if binding is None or binding.transient(key) or key in self.pending or not self._key_ok(key):
+                continue  # (values for another structure would land on the wrong things)
             self.inbox[key] = (value, None)
 
     # --- pending changes ------------------------------------------------------
@@ -629,7 +706,24 @@ class SyncClient:
 
     def _refresh_units(self):
         for b in self.bindings:
-            self.units[b] = list(b.units())
+            try:
+                self.units[b] = list(b.units())
+            except Exception:  # keeps the units it had
+                self._failed(b, self.last_tick)
+
+    def _failed(self, binding, now):
+        """An area of FL refused to be read or written (a plugin that is still
+        loading does that): the other areas go on, and this one is tried again
+        next time. Said at most once per ERROR_LOG_INTERVAL per area."""
+        if now >= self.failing.get(binding, float("-inf")):
+            self.failing[binding] = now + ERROR_LOG_INTERVAL
+            self._tell("fel i %s/ (försöker igen): %s" % (binding.prefix, _error_text()))
+
+    def _tell(self, text):
+        """Log in FL's Script output and, through the bridge, in FLSync's log."""
+        log(text)
+        if self.bridge_seen and self.link.can_send():
+            self.link.send({"t": "log", "data": text})
 
     def _mark(self, binding, units):
         if units == ALL:
@@ -641,58 +735,69 @@ class SyncClient:
         """Take FL's current values as the baseline without sending anything."""
         self.shadow = {}
         for b in self.bindings:
-            for unit in self.units[b]:
-                self.shadow.update(_readable(b.read(unit)))
+            try:
+                for unit in self.units[b]:
+                    self.shadow.update(_readable(b.read(unit)))
+            except Exception:
+                self._failed(b, self.last_tick)
             self.dirty[b].clear()
         self.all_dirty.clear()
 
     def _detect_local_changes(self, now):
         changes = []
         bases = {}  # key -> its value before the change, for the changes sent now
-        send = self.joined and not self.need_seed and self.synced
+        # Keys only go out where our structure is the session's (_key_ok).
+        send = self.joined and not self.need_seed
         # Out of the session with the structure we left it with: remember what
         # each changed key was before, to send the changes when we're back.
         record = self.offline and not self.joined and self.my_fp == self.offline_fp
         for b in self.bindings:
-            units = self.units[b]
-            existing = set(units)
-            reread, rebaseline = b.tick(now)
-            for unit in rebaseline:
-                if unit in existing:
-                    self.shadow.update(_readable(b.read(unit)))
-            if b in self.all_dirty or reread == ALL:
-                todo = units
-            else:
-                todo = set(self.dirty[b])
-                todo.update(reread)
-                # Also re-read a few units every tick, in case FL didn't report a change.
-                count = len(units)
-                for _ in range(min(b.sweep_budget, count)):
-                    self.sweep[b] %= count
-                    todo.add(units[self.sweep[b]])
-                    self.sweep[b] += 1
-            self.dirty[b].clear()
-            self.all_dirty.discard(b)
-            for unit in todo:
-                if unit not in existing:
-                    continue
-                for key, value in _readable(b.read(unit)):
-                    until = self.settling.get(key)
-                    if until is not None:
-                        if until > now:
-                            continue
-                        del self.settling[key]
-                    before = self.shadow.get(key, _MISSING)
-                    if before != value:
-                        self.shadow[key] = value
-                        if send:
-                            changes.append((key, value))
-                            if not b.transient(key):
-                                bases[key] = before
-                        elif record and key not in self.offline_base and not b.transient(key):
-                            self.offline_base[key] = before
+            try:
+                self._detect_in(b, now, send, record, changes, bases)
+            except Exception:  # what it found before failing still goes out
+                self._failed(b, now)
         if changes:
             self._send(changes, now, bases=bases)
+
+    def _detect_in(self, b, now, send, record, changes, bases):
+        """Look for local changes in one binding's units."""
+        units = self.units[b]
+        existing = set(units)
+        reread, rebaseline = b.tick(now)
+        for unit in rebaseline:
+            if unit in existing:
+                self.shadow.update(_readable(b.read(unit)))
+        if b in self.all_dirty or reread == ALL:
+            todo = units
+        else:
+            todo = set(self.dirty[b])
+            todo.update(reread)
+            # Also re-read a few units every tick, in case FL didn't report a change.
+            count = len(units)
+            for _ in range(min(b.sweep_budget, count)):
+                self.sweep[b] %= count
+                todo.add(units[self.sweep[b]])
+                self.sweep[b] += 1
+        self.dirty[b].clear()
+        self.all_dirty.discard(b)
+        for unit in todo:
+            if unit not in existing:
+                continue
+            for key, value in _readable(b.read(unit)):
+                until = self.settling.get(key)
+                if until is not None:
+                    if until > now:
+                        continue
+                    del self.settling[key]
+                before = self.shadow.get(key, _MISSING)
+                if before != value:
+                    self.shadow[key] = value
+                    if send and self._key_ok(key):
+                        changes.append((key, value))
+                        if not b.transient(key):
+                            bases[key] = before
+                    elif record and key not in self.offline_base and not b.transient(key):
+                        self.offline_base[key] = before
 
     # --- writing ----------------------------------------------------------------
 
@@ -754,7 +859,11 @@ class SyncClient:
             return
         if not binding.transient(key) and self.shadow.get(key, _MISSING) == value:
             return  # FL has it already: writing it would only mark the project changed (and cost a call)
-        actual = binding.write(key, value)
+        try:
+            actual = binding.write(key, value)
+        except Exception:  # (a plugin that is loading): the session's value comes again with the next change
+            self._failed(binding, now)
+            return
         if actual is None:
             return
         self.shadow[key] = actual
@@ -773,8 +882,23 @@ class SyncClient:
 
     @property
     def synced(self):
-        """Whether our project has the session's structure, so values can flow."""
+        """Whether our project has the session's structure, so all values can flow."""
         return self.session_fp is None or self.my_fp is None or self.my_fp == self.session_fp
+
+    def _key_ok(self, key):
+        """Whether a key means the same here as in the session: our structure
+        is the session's in the part the key's thing is found by."""
+        return not parts_differ(self.my_fp, self.session_fp, key_area(key))
+
+    def _ok_areas(self):
+        """The parts of the structure ("c", "m") that are the session's here."""
+        return {area for area, _ in AREAS if not parts_differ(self.my_fp, self.session_fp, area)}
+
+    def _paused_text(self):
+        """'kanalerna pausade', 'mixern pausad' or 'kanalerna och mixern pausade'."""
+        ok = self._ok_areas()
+        names = [name for area, name in AREAS if area not in ok] or [name for _, name in AREAS]
+        return "%s %s" % (" och ".join(names), "pausad" if names == ["mixern"] else "pausade")
 
     def _other_fls(self):
         return any(p.get("app") == "fl" for p in self.peers.values())
@@ -789,7 +913,10 @@ class SyncClient:
     def _check_fp(self, now):
         self.next_fp = now + FP_INTERVAL
         self.fp_due = False
-        self.local_fp = self.fingerprint()
+        fp = self.fingerprint()
+        if fp is None and self.local_fp is not None:
+            return  # FL can't tell just now (a plugin loading): the structure is what it said before
+        self.local_fp = fp
         fp = self._effective_fp()
         if fp == self.my_fp:
             return
@@ -798,9 +925,10 @@ class SyncClient:
     def _new_fp(self, fp, load=False):
         """Our structure changed (as the session sees it): tell the relay, and
         pause or resume. `load`: because of what we opened, not an edit."""
-        was_synced, self.my_fp = self.synced, fp
-        if was_synced and not self.synced:
-            self.inbox.clear()  # others' values not written yet: made for what the numbers meant before
+        was_ok, self.my_fp = self._ok_areas(), fp
+        lost, gained = was_ok - self._ok_areas(), self._ok_areas() - was_ok
+        if lost:  # others' values not written yet: made for what the numbers meant before
+            self.inbox = {k: v for k, v in self.inbox.items() if key_area(k) not in lost}
         if not self.joined:
             if self.offline_base and fp != self.offline_fp:
                 # Keys address channels and plugins by number: they may mean other things now.
@@ -814,12 +942,13 @@ class SyncClient:
         self.link.send(msg)
         if not self._other_fls():
             return  # alone: the relay takes our structure and answers with `reshare`
-        if was_synced and not self.synced:
-            log("du har ändrat projektets kanaler eller plugins, så synken är pausad. Spara (Ctrl+S) "
-                "för att dela ändringen med de andra.")
+        if gained:
+            self.link.send({"t": "sync"})  # back to the session's structure there: take its values
+        if lost:
+            self._tell("du har ändrat projektets plugins eller kanaler, så %s tills du sparar (Ctrl+S) och "
+                       "delar ändringen. Resten synkar som vanligt." % self._paused_text().replace("pausad", "är pausad"))
             self._update_pause("local")
-        elif self.synced and not was_synced:
-            self.link.send({"t": "sync"})  # back to the session's structure: take its values
+        elif gained:
             self._update_pause()
 
     def _on_loaded(self, msg):
@@ -861,10 +990,13 @@ class SyncClient:
         """Someone (maybe we) shared a new version of the project. The bridge
         tells us at once, and once more with `path` when it has written the
         project folder for us."""
-        was_synced, previous = self.synced, self.snapshot or {}
+        was_ok, previous = self._ok_areas(), self.snapshot or {}
         self.snapshot = msg
         if msg.get("fp"):
             self.session_fp = msg.get("fp")
+        lost, gained = was_ok - self._ok_areas(), self._ok_areas() - was_ok
+        if lost:
+            self.inbox = {k: v for k, v in self.inbox.items() if key_area(k) not in lost}
         if msg.get("from") == self.my_id:
             log("din version (%s) är delad med sessionen" % msg.get("v"))
             self.waiting_hint = "FLSync: din version är delad"
@@ -875,12 +1007,20 @@ class SyncClient:
             return  # the same version, now with its folder
         log("%s delade version %s av %s" % (msg.get("by"), msg.get("v"), msg.get("name")))
         saved = msg.get("how") == "save"  # a save: our Ctrl+S merges it in (else: open it on the FLSync page)
-        if was_synced and not self.synced:
-            log("den har andra kanaler eller plugins än ditt projekt, så synken är pausad tills du %s"
-                % ("sparar (Ctrl+S) och får med den" if saved else "öppnar den"))
-        elif self.synced and not was_synced:
+        if lost:
+            log("den har andra plugins eller kanaler än ditt projekt, så %s tills du %s"
+                % (self._paused_text().replace("pausad", "är pausad"),
+                   "sparar (Ctrl+S) och får med den" if saved else "öppnar den"))
+        if gained:
             self.link.send({"t": "sync"})
-        if saved:
+        if msg.get("switch"):
+            # Another project: Ctrl+S keeps ours in its file, and FL opens theirs then.
+            log("%s bytte sessionens projekt till %s. %s" % (
+                _who(msg.get("by")), _shown(msg.get("name")),
+                "Det öppnas nu." if msg.get("how") is None else "Spara ditt (Ctrl+S), så öppnas det."))
+            self.waiting_hint = "FLSync: %s bytte projekt till %s%s" % (
+                _who(msg.get("by")), _shown(msg.get("name")), "" if msg.get("how") is None else ", tryck Ctrl+S")
+        elif saved:
             log("spara (Ctrl+S) för att få med %s ändringar i ditt projekt" % _genitive(_who(msg.get("by"))))
             self.waiting_hint = "FLSync: %s har sparat, tryck Ctrl+S för att få med ändringarna" % _who(msg.get("by"))
         else:
@@ -962,9 +1102,24 @@ class SyncClient:
             if opening:
                 hint = "FLSync: inget nytt att dela%s" % then
         elif outcome == "unrelated":
-            log("projektet hör inte till sessionen, så sparningen delades inte. Öppna sessionens version i "
-                "FLSync-fönstret, eller gör ditt projekt till sessionens där (Dela mitt projekt).")
-            hint = "FLSync: projektet hör inte till sessionen, öppna sessionens version i FLSync-fönstret"
+            confirm = _count(msg.get("confirm"), None)
+            if confirm:
+                self._tell("projektet hör inte till sessionen, så sparningen delades inte. Spara igen (Ctrl+S) inom "
+                           "%d sekunder för att göra det till allas projekt, eller öppna sessionens version i "
+                           "FLSync-fönstret." % confirm)
+                hint = "FLSync: inte sessionens projekt. Ctrl+S igen inom %d s gör det till allas" % confirm
+            else:
+                log("projektet hör inte till sessionen, så sparningen delades inte. Öppna sessionens version i "
+                    "FLSync-fönstret, eller gör ditt projekt till sessionens där (Dela mitt projekt).")
+                hint = "FLSync: projektet hör inte till sessionen, öppna sessionens version i FLSync-fönstret"
+        elif outcome == "switched":
+            self._tell("ditt projekt är nu sessionens%s: de andra får det öppnat"
+                       % (" (version %d)" % version if version is not None else ""))
+            hint = "FLSync: ditt projekt är nu allas"
+        elif outcome == "old":
+            log("%s bytte sessionens projekt, så din sparning delades inte (den finns kvar i din fil)"
+                % _who(", ".join(_names(msg.get("with")))))
+            hint = "FLSync: %s bytte projekt%s" % (_who(", ".join(_names(msg.get("with")))), then)
         elif outcome == "replaced":
             log("sparningen kunde inte slås ihop med %s version%s, så din version ersatte den. Deras finns kvar "
                 "i mappen Versioner." % (theirs, because))
@@ -994,14 +1149,17 @@ class SyncClient:
             return
         latest = self.snapshot or {}
         theirs = latest.get("fp") == self.session_fp and latest.get("from") not in (None, self.my_id)
+        paused = "FLSync: %s" % self._paused_text()  # the rest (tempo, play, playlist tracks...) still syncs
         if cause == "local":
-            reason = "FLSync pausad: du har ändrat kanaler eller plugins, spara för att dela"
+            reason = "%s, spara för att dela din ändring" % paused
+        elif theirs and latest.get("switch"):  # Ctrl+S keeps ours in its file and opens theirs
+            reason = "%s, tryck Ctrl+S för att öppna %s projekt" % (paused, _genitive(_who(latest.get("by"))))
         elif theirs and latest.get("how") == "save":  # Ctrl+S merges it in and opens the result
-            reason = "FLSync pausad: tryck Ctrl+S för att få %s version" % _genitive(_who(latest.get("by")))
+            reason = "%s, tryck Ctrl+S för att få %s version" % (paused, _genitive(_who(latest.get("by"))))
         elif theirs:
-            reason = "FLSync pausad: öppna %s version av projektet" % _genitive(latest.get("by"))
+            reason = "%s, öppna %s version av projektet" % (paused, _genitive(latest.get("by")))
         else:
-            reason = "FLSync pausad: öppna samma projekt som de andra, eller be dem spara det"
+            reason = "%s, öppna samma projekt som de andra, eller be dem spara det" % paused
         if reason != self.pause_reason:
             self.pause_reason = reason
             self.next_pause_hint = 0.0  # show it at once
@@ -1020,6 +1178,12 @@ def _each(items, work, *args):
                 error = e
     if error is not None:
         raise error
+
+
+def _error_text():
+    """The exception being handled, in one line."""
+    error = sys.exc_info()[1]
+    return ("%s: %s" % (error.__class__.__name__, error))[:200] if error is not None else "okänt fel"
 
 
 def _readable(pairs):

@@ -626,12 +626,12 @@ class SnapshotHowTest(Phase4Test):
     def test_paused_by_a_saved_version_says_press_ctrl_s(self):
         self.join()
         self.notice(2, OTHER_FP, "save")
-        self.shown("FLSync pausad: tryck Ctrl+S för att få Kims version")
-        self.assertTrue(self.logged("pausad tills du sparar (Ctrl+S)"))
+        self.shown("FLSync: kanalerna och mixern pausade, tryck Ctrl+S för att få Kims version")
+        self.assertTrue(self.logged("pausade tills du sparar (Ctrl+S)"))
         self.notice(3, OTHER_FP, "open", by="Jonas", sender="c3")
-        self.shown("FLSync pausad: öppna Jonas version av projektet")
+        self.shown("FLSync: kanalerna och mixern pausade, öppna Jonas version av projektet")
         self.notice(4, OTHER_FP, None, by="Max", sender="c4")
-        self.shown("FLSync pausad: öppna Max version av projektet")
+        self.shown("FLSync: kanalerna och mixern pausade, öppna Max version av projektet")
 
 
 # --- the real script over MIDI ---------------------------------------------------------------

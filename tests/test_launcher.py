@@ -136,8 +136,10 @@ def fake_midi(fl):
 
 def places(folder, project=None):
     """Every place on disk a bridge uses, inside `folder`; never the real FL's
-    recent files or window title (a real FL may run meanwhile)."""
+    recent files or window title (a real FL may run meanwhile), and a version
+    the bridge opens never reaches Windows (it would start FL Studio)."""
     return {"mru": lambda: project, "mru_all": lambda: [], "fl_title": lambda: None,
+            "fl_open": lambda: False, "opener": lambda path: None,
             "cache_dir": os.path.join(folder, "cache"),
             "projects_dir": os.path.join(folder, "Projects", "FLSync"), "notes_dir": os.path.join(folder, "notes"),
             "plugin_db": os.path.join(folder, "Plugin database", "Installed"),
