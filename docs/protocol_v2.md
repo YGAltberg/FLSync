@@ -332,6 +332,44 @@ Additive; `PROTO` stays 2. Older peers keep working, they just pause more.
   (at most every 30 s). FL -> bridge `log {data}` lines (stalls, failing
   areas, pauses, what the FL offers scripts) go to FLSync's log.
 
+## 0.11 additions: content without Ctrl+S
+
+Clips, notes, samples, new channels and plugins and their state can't be
+keys (FL's script API can't read or write them; FL 2026's `ilmcp` module,
+which Gopher uses to add channels and effects, can't be imported by a MIDI
+script: measured in 26.1.7). They travel as versions, and FL saves them by
+itself (flsync_content.py):
+
+* The script counts *content*: an undo step (`general.getUndoHistoryCount/
+  Pos`, or OnRefresh `HW_Dirty_Undo` with few flags; FL refreshes everything
+  with 11 flags as the script starts or a project loads) with no live change
+  within 1 s of it (FL 26.1.7 makes the script's own writes undo steps too),
+  more patterns, a longer song, a new structure, a change of a key in a
+  paused part.
+* Bridge -> FL `autosave {ok}`: FL may save by itself. Only in a session
+  with other FLs, when FL's project is the session's (a known base) and a
+  writable file of its own that FL's title names, not under FL's own
+  folder. `{ok: false, broken: true}`: FL said it would save and no save
+  came within 15 s; it is never asked again in this run.
+* FL -> bridge `autosave {content, pull}` right before FL saves by itself
+  (`transport.globalTransport(FPT_Save, 1, PME_System, GT_Global)`, from
+  OnIdle only, FL 26.1.7 or later, never while recording): once content > 0
+  and nothing changed for 2 s, at most every 5 s.
+* The bridge takes the next save after `autosave` for that one. With
+  content 0, or when `flp_merge.content_changes(base, save)` finds only live
+  values changed, it isn't shared: `saved {outcome: "unchanged"}`, or, if
+  someone shared a newer version, the save is merged with it locally and FL
+  opens the result (`pulled`). No version goes round in circles.
+* Bridge -> FL `pull {by, v}`: the newest version isn't what FL has and FL
+  can't just open it (unsaved changes; writing others' values makes them).
+  Not for a version whose plugins are missing here or from a newer FL. FL
+  saves once it is stopped, not recording and nothing changed for 2 s, after
+  a 3 s countdown in the hint bar ("hämtar Kims ändringar om 3 s"); any
+  change here starts it over. That save brings the version in as above.
+* The bridge paces MIDI to FL by the clock (4000 events/s, bursts of 120).
+  A hello while the welcome is still being sent doesn't restart the
+  session; FL doesn't say hello again while a message is coming in.
+
 ## Ordering and conflicts
 
 * The relay handles messages one at a time. Every accepted pair gets the next

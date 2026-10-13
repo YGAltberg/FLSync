@@ -672,6 +672,14 @@ class AutoSaveTest(Phase4Test):
         self.tick(100, 0.1)
         self.assertEqual(self.saves(), [])  # once: until something else changes
 
+    def test_fl_refreshing_everything_is_no_edit(self):
+        self.client.on_refresh(443735)  # what FL 26.1.7 sends a moment after the script starts or a load
+        self.tick(40, 0.1)
+        self.assertEqual(self.saves(), [])
+        self.client.on_refresh(131332)  # an edit's (measured): undo, LEDs, mixer controls
+        self.tick(40, 0.1)
+        self.assertEqual(len(self.saves()), 1)
+
     def test_a_live_change_is_no_content(self):
         self.edit()
         self.fl.set_volume(2, 0.4)  # the undo step was this fader: the others have it already

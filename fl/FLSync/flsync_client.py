@@ -84,6 +84,7 @@ AUTOSAVE_QUIET = 2.0            # FL saves by itself once nothing changed here f
 AUTOSAVE_INTERVAL = 5.0         # ...and at most this often
 PULL_IDLE = 2.0                 # someone else's version is loaded once nothing changed here for this long,
 PULL_COUNTDOWN = 3.0            # ...and FL said so this long before
+FULL_REFRESH = 8                # an OnRefresh with this many flags is FL refreshing everything, not an edit
 # The part of the structure fingerprint (flsync_structure.py) each key prefix
 # depends on: "c" the channels, "m" the mixer. Others (song, transport,
 # playlist tracks, patterns) mean the same in every structure.
@@ -259,6 +260,7 @@ class SyncClient:
         self.last_flag = None    # the changed flag at the last look: going from set to 0 is a save
         self.loaded = False      # a project load happened since the last tick (saves_from is set then)
         self.saves_from = 0.0    # a 0 before this is FL settling after a load, not a save
+        self.undo_from = 0.0     # undo steps before this are FL refreshing after a start or load (on_refresh)
         self.hold_until = None   # while set, others' values wait in the inbox (a save is being merged)
         self.held_back = False   # the inbox has values that waited: old news, written without presence hints
         self.offline = False     # we left a session in sync: remember what changes until we're back
@@ -302,6 +304,8 @@ class SyncClient:
 
     def tick(self, now):
         since, self.last_tick = now - self.last_tick, now
+        if since == float("inf"):
+            self.undo_from = now + LOAD_SETTLE  # the script just started: FL refreshes everything soon
         if STALL_TIME <= since < float("inf"):
             # FL itself was busy (a plugin or project loading, a dialog): the
             # bridge only seemed silent because we didn't listen, and it keeps
@@ -310,6 +314,7 @@ class SyncClient:
             self._tell("FL var upptaget i %.1f s" % since)
         if self.loaded:
             self.loaded, self.saves_from = False, now + LOAD_SETTLE
+            self.undo_from = self.saves_from
         self._refresh_units()
         _each(self.link.poll(), self._handle, now)
         gaps = self.link.stats["gaps"]
@@ -378,8 +383,14 @@ class SyncClient:
             self._mark(b, b.on_dirty_channel(index, flag))
 
     def on_refresh(self, flags):
-        if flags & flsync_content.UNDO:
-            self.undo_steps.append(self.last_tick)  # an edit (or undo): content unless a live value changed
+        # An edit (or undo): content unless a live value changed. Not the
+        # refresh of everything FL does as the script starts or a project
+        # loads (measured in FL 26.1.7: 11 flags, a moment after the first
+        # tick; an edit's refresh has 3): nothing was edited then.
+        everything = bin(flags).count("1") >= FULL_REFRESH
+        if (flags & flsync_content.UNDO and not everything and not (self.loading or self.loaded)
+                and self.last_tick >= self.undo_from):
+            self.undo_steps.append(self.last_tick)
         for b in self.bindings:
             self._mark(b, b.on_refresh(flags))
 

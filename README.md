@@ -1,8 +1,8 @@
 # FLSync – FL Studio tillsammans
 
-Spela in och producera tillsammans i FL Studio, var och en i sin egen FL. Drar någon i en fader, vrider på ett plugin eller klickar i stegsekvensern, så händer samma sak hos de andra direkt. Lägger någon till kanaler, plugins, samples, noter eller klipp och sparar, så slås ändringarna ihop med de andras och alla får samma projekt. Alla hör ljudet från sin egen FL, i full kvalitet och utan fördröjning i ljudet.
+Spela in och producera tillsammans i FL Studio, var och en i sin egen FL. Drar någon i en fader, vrider på ett plugin eller klickar i stegsekvensern, så händer samma sak hos de andra direkt. Lägger någon till kanaler, plugins, samples, noter eller klipp, så sparar FL det av sig själv och ändringarna slås ihop med de andras: alla får samma projekt. Alla hör ljudet från sin egen FL, i full kvalitet och utan fördröjning i ljudet.
 
-**Det enda du behöver komma ihåg: Ctrl+S i FL = synka projektet.** Dina ändringar går till de andra, och du får deras.
+**Du behöver inte göra något särskilt:** med FL 2026.1.7 eller senare sparar och hämtar FLSync själv. **Ctrl+S i FL = synka projektet nu** fungerar alltid (och behövs i äldre FL).
 
 Fungerar på Windows med FL Studio 2025 och 2026, i samma nätverk eller över internet.
 
@@ -46,7 +46,7 @@ Stänger du FLSync-fönstret avslutas FLSync. Gör du det (eller stänger datorn
 | **Spellistan** | spårens namn, färg och mute |
 | **Närvaro** | FL:s hint-rad visar vem som ändrar vad, t.ex. `Anna: Insert 3 volym`, och när någon ansluter eller lämnar |
 
-**När någon sparar (Ctrl+S):** hela projektet, alltså nya och borttagna kanaler och plugins, samples, noter, klipp i spellistan och automation. FLSync skickar projektfilen och de samples som behövs, även samples inuti plugins som FPC och DirectWave. FL:s script-API kan inte ändra sådant live, så det går inte fortare än så. Se [Spara och slå ihop](#spara-och-slå-ihop).
+**Av sig själv, några sekunder efter att du slutat ändra (eller när du sparar):** hela projektet, alltså nya och borttagna kanaler och plugins med sina inställningar, samples, noter, klipp i spellistan och automation. FL sparar själv när något sådant har ändrats och du inte har rört något på två sekunder (FL 2026.1.7 eller senare; i äldre FL trycker du Ctrl+S). FLSync skickar projektfilen och de samples som behövs, även samples inuti plugins som FPC och DirectWave. Hos de andra laddas det in när de har stoppat uppspelningen, efter en nedräkning i hint-raden. En sparning med bara sådant som redan synkas live delas inte. FL:s script-API kan inte ändra sådant live, så det går inte fortare än så. Se [Spara och slå ihop](#spara-och-slå-ihop).
 
 **Noter på begäran:** i pianorullen kan du skicka ett mönsters noter till de andra, och hämta deras, utan att någon behöver spara eller öppna något. Se [Noter](#noter).
 
@@ -57,7 +57,7 @@ Varje gång du sparar jämför FLSync tre versioner: den du utgick från, den du
 - **Ingen annan har sparat sedan du öppnade projektet:** din version delas som den är.
 - **Någon annan har sparat:** FLSync slår ihop versionerna, delar resultatet och öppnar det i din FL (när du inte spelar; annars när du stoppar). Ändringar på olika ställen följer med båda: noter not för not (två kan skriva i samma mönster), klipp i spellistan klipp för klipp, kanaler, mönster, mixerkanaler och spår var för sig. Har ni ändrat *samma* sak behålls din ändring, och FLSync säger var.
 - **Du hade inget nytt:** inget delas, du får den senaste versionen öppnad.
-- **De andra** ser i hint-raden `Anna har sparat, tryck Ctrl+S för att få med ändringarna`. Har deras FL inga osparade ändringar öppnas den nya versionen direkt.
+- **De andra** ser i hint-raden `Anna har sparat, hämtas in när du stoppar`. När deras uppspelning är stoppad och de inte rör något räknar hint-raden ner (`hämtar Annas ändringar om 3 s`), deras FL sparar deras egna ändringar och öppnar det sammanslagna projektet. Ändrar de något under nedräkningen börjar den om. (I FL äldre än 2026.1.7: `tryck Ctrl+S för att få med ändringarna`.)
 - **Går det inte att slå ihop** (ni har båda lagt till kanaler, eller sparat i olika FL-versioner, t.ex. 2025 och 2026) ersätter den senaste sparningen den förra, och båda får veta det. Den ersatta versionen ligger kvar i mappen `Versioner` bredvid projektet.
 
 FLSync skriver aldrig över dina egna filer. Sessionens projekt ligger i `Dokument\Image-Line\FL Studio\Projects\FLSync\<namn>\`, och där sparar FL sedan. Varje version som ersätts där kopieras först till `Versioner` (de 20 senaste sparas). Rattar, steg och plugin-inställningar är redan lika hos alla, eftersom de synkas live.
@@ -114,7 +114,7 @@ Ditt namn och den senaste inbjudan sparas i `%LOCALAPPDATA%\FLSync\settings.json
 
 ## Kända begränsningar
 
-- **Innehåll synkas inte live.** Nya kanaler, plugins, samples, klipp i spellistan och automation kommer fram när någon sparar (Ctrl+S). FL laddar då om projektet, så ångra-historiken börjar om; FLSync väntar tills du har stoppat uppspelningen. Det går inte att göra live: FL:s script-API (även i FL 2026) kan inte läsa eller lägga klipp i spellistan, lägga till kanaler eller ladda plugins.
+- **Innehåll synkas automatiskt, men inte live.** Nya kanaler och plugins (med sina inställningar), samples, klipp i spellistan, noter och automation sparar FL av sig själv när du har slutat ändra i ett par sekunder (FL 2026.1.7 eller senare; i äldre FL med Ctrl+S). Hos de andra laddas det in när de har stoppat uppspelningen och inte rör något: hint-raden räknar ner (`hämtar Annas ändringar om 3 s`), deras egna ändringar sparas och slås ihop först, och projektet laddas om (ångra-historiken börjar om). Mitt i en uppspelning laddas aldrig något. Live går det inte att göra: FL:s script-API, även i FL 2026, kan inte läsa eller lägga klipp i spellistan, lägga till kanaler eller ladda plugins (den modul Gopher använder för det kan ett MIDI-script inte nå).
 - **Sammanslagningen** behåller din ändring där ni båda ändrat samma kanal, mönsterinställning eller mixerkanal (noter och klipp slås ihop ett och ett). Det här går inte att slå ihop: att ni båda lägger till kanaler, att någon tar bort eller flyttar kanaler, mönster eller mixerkanaler, att någon lägger till mixerkanaler, och versioner sparade i olika FL-versioner. Då ersätter den senaste sparningen den förra (som finns kvar i `Versioner`), och båda får veta det.
 - **Noter** går bara när någon kör notscripten. FLSync antar att pianorullen visar den kanal som är vald i kanalracket.
 - **Två olika projekt med samma filnamn** (t.ex. två `Beat.flp` i olika mappar) kan FLSync blanda ihop när du öppnar det andra under en session. FL visar bara filnamnet, så FLSync ser vilken mapp först när FL sparar. Byt namn på det ena (*File → Save as*) om du byter projekt mitt i en session.

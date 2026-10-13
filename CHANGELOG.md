@@ -1,5 +1,12 @@
 # Ändringar
 
+## 0.11.0 – innehåll utan Ctrl+S
+
+- **FL sparar av sig själv** (FL 2026.1.7 eller senare): har du lagt till kanaler, plugins, samples, klipp eller noter, alltså sådant som inte kan synkas live, sparar FL några sekunder efter att du slutat ändra, och det delas som när du trycker Ctrl+S. En sparning med bara sådant som redan synkas live delas inte.
+- **De andras ändringar laddas in av sig själva:** när uppspelningen är stoppad och du inte rör något räknar hint-raden ner, din FL sparar dina egna ändringar och öppnar det sammanslagna projektet. Mitt i en uppspelning laddas aldrig något.
+- **Stora sessioner ansluter på en gång:** förut kunde den som anslöt till en lång session (mycket att skicka) börja om igen och igen. Bryggan skickar nu i jämn takt till FL.
+- Testat live i FL 2026.1.7: FL sparar på begäran utan dialogrutor, och skriptets egna ändringar hamnar i ångra-historiken (FLSync räknar dem inte som innehåll). Gophers modul för att lägga till kanaler och effekter går inte att använda från ett MIDI-script, så nya plugins kan inte dyka upp live hos de andra.
+
 ## 0.10.0 – stabilare session
 
 Efter det första riktiga testet på två datorer:
