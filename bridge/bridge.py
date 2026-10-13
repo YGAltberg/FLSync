@@ -56,6 +56,11 @@ FL_GONE = 120.0             # ...and counts as gone after this long, or as soon 
 FL_CHECK_INTERVAL = 1.0     # how often a silent FL's window is looked for
 CONFIRM_TIME = 15.0         # saving a project that isn't the session's again within this makes it everyone's
 AUTOSAVE_CHECK = 15.0       # FL asked to save by itself (`autosave`) and no save seen within this: it can't
+AUTOSAVE_RETRY = 60.0       # ...now (a dialog was open): it is asked again after this,
+AUTOSAVE_TRIES = 3          # ...until it didn't save this many times in a row
+BACKUP_EVERY = 600.0        # of the copies FL's Backup folder gets for FL's saves by itself, one per project per this stays
+BACKUP_SLACK = 2.0          # a copy this much older than the `autosave` that asked for the save is still that save's
+BACKUP_COPY = re.compile(r" \(overwritten (?:on \d{4}-\d{2}-\d{2} )?at \d{1,2}h\d{2}\)(?:_\d+)?\.flp", re.I)
 SEARCH_DEPTH = 3            # how deep FL's projects folder is searched for the file FL's title names...
 SEARCH_KEPT = 30.0          # ...and how long what was found counts
 LIVE_FOLDER = "Kanaler"      # in a version's folder: the channels brought into FL live, as plugin presets
@@ -986,7 +991,10 @@ class Bridge:
         self.auto_sync = auto_sync
         self.autosave_sent = None  # what FL last heard: may it save by itself
         self.autosave = None     # {at, content, pull, seen}: FL said it saves by itself now
-        self.autosave_broken = False  # FL didn't save when it said it would: never asked again
+        self.autosave_failures = 0  # FL didn't save when it said it would, this many times in a row...
+        self.autosave_retry = 0.0  # ...so it isn't asked to before this (AUTOSAVE_TRIES: never again)
+        self.backups_kept = {}   # project name (casefolded): (time, path) of the last copy FL's Backup folder kept for a save by itself
+        self.backups_told = False  # the log said why those copies go
         self.pull_sent = None    # the version FL was asked to get in (`pull`)
         self.search = None       # (name, when, path or None): the last search for the file FL's title names
         self._load_state()
@@ -1019,6 +1027,7 @@ class Bridge:
             self.fl_fp = fingerprint(msg.get("fp"))
             self.fl_version = fl_version(msg.get("flv"))
             self.autosave_sent = self.pull_sent = None  # a new run of the script hears them again
+            self.autosave_failures, self.autosave_retry = 0, 0.0  # (and whatever dialog stopped it is gone)
             self._start_session(msg)
             self._reported("hello")
         elif kind == "autosave":
@@ -1546,6 +1555,9 @@ class Bridge:
             return False
         sha = hashlib.sha256(data).hexdigest()
         auto, self.autosave = self.autosave, None  # FL saved by itself (docs/phase5.md)
+        if auto is not None:
+            self.autosave_failures = 0
+            self._thin_backups(path, auto["at"])
         if sha == self.last_sha or sha == self.unshareable:
             self._tell_saved("unchanged")
             return True  # nothing new: saved without changes, or the version we wrote ourselves
@@ -1935,7 +1947,9 @@ class Bridge:
         and its project is the session's (or the session switched to another
         one, which a save brings in: `pull`) and a file of its own on disk that
         FL's title names. Never a new, unsaved project: that would ask where."""
-        if not self.auto_sync or self.autosave_broken or not self.in_session() or not self._other_fls():
+        if not self.auto_sync or not self.in_session() or not self._other_fls():
+            return False
+        if self.autosave_failures >= AUTOSAVE_TRIES or time.monotonic() < self.autosave_retry:
             return False
         if self.base is None and not (pull and self.newest and self.newest.get("switch")):
             return False
@@ -1950,6 +1964,57 @@ class Bridge:
         except Exception:
             title = None
         return title_shows(title, os.path.splitext(os.path.basename(path))[0])
+
+    def _thin_backups(self, path, asked_at):
+        """FL copies a project into its Backup folder each time it saves it, and
+        keeps only its newest copies of all projects together (File settings,
+        Backup: Maximum, 100 by default): FL saving by itself every few seconds
+        would soon push out the copies of every other project. Of the copies
+        made for the save FL was asked for at `asked_at` (and before it), one
+        per project per BACKUP_EVERY stays; the session keeps the versions
+        anyway. A copy made for a save of the user's own is never touched."""
+        user = self.fl_dirs.get("user_dir")
+        if not user:
+            return
+        folder = os.path.join(user, "FL Studio", "Projects", "Backup")
+        stem = file_stem(path)
+        key = stem.casefold()
+        since = time.time() - (time.monotonic() - asked_at) - BACKUP_SLACK
+        try:
+            entries = list(os.scandir(folder))
+        except OSError:
+            return  # no such folder: FL keeps its backups elsewhere (the project's folder), or none
+        copies = []
+        for entry in entries:
+            name = entry.name
+            if name[:len(stem)].casefold() != key or not BACKUP_COPY.fullmatch(name[len(stem):]):
+                continue
+            try:
+                if entry.is_file(follow_symlinks=False) and entry.stat().st_mtime >= since:
+                    copies.append((entry.stat().st_mtime, entry.path))
+            except OSError:
+                continue
+        removed = 0
+        for mtime, copy in sorted(copies):
+            kept = self.backups_kept.get(key)
+            if kept is not None and same_file(copy, kept[1]):
+                continue  # the one that stays (an earlier save's, just before this one)
+            if kept is None or mtime - kept[0] >= BACKUP_EVERY:
+                self.backups_kept[key] = (mtime, copy)
+                continue
+            try:
+                with open(copy, "rb") as f:
+                    if f.read(4) != b"FLhd":
+                        continue  # not an FL project after all
+                os.remove(copy)
+                removed += 1
+            except OSError:
+                continue
+        if removed and not self.backups_told:
+            self.backups_told = True
+            self.log("FL lägger en kopia i sin Backup-mapp varje gång det sparar, och behåller bara de senaste "
+                     "för alla projekt. FLSync tar bort kopiorna av sina egna sparningar utom en var tionde "
+                     "minut, så att dina andra backups finns kvar")
 
     def set_auto_sync(self, on):
         """FL saving by itself and getting others' versions in: on or off (the
@@ -1966,10 +2031,17 @@ class Bridge:
         an FL that said it would save but didn't (a dialog came instead)."""
         asked = self.autosave
         if asked is not None and not asked["seen"] and now - asked["at"] > AUTOSAVE_CHECK:
-            self.autosave, self.autosave_broken = None, True
-            self.log("FL sparade inte när det skulle spara av sig självt, så FLSync ber inte om det mer. "
-                     "Det som inte synkas live delas när du sparar (Ctrl+S)")
-            self.to_fl({"t": "autosave", "ok": False, "broken": True})
+            self.autosave = None
+            self.autosave_failures += 1
+            self.autosave_retry = now + AUTOSAVE_RETRY
+            again = self.autosave_failures < AUTOSAVE_TRIES
+            if again:
+                self.log("FL sparade inte när det skulle spara av sig självt (en dialog var kanske öppen), "
+                         "FLSync försöker igen om en minut")
+            else:
+                self.log("FL sparade inte när det skulle spara av sig självt, %d gånger i rad, så FLSync ber inte "
+                         "om det mer. Det som inte synkas live delas när du sparar (Ctrl+S)" % AUTOSAVE_TRIES)
+            self.to_fl({"t": "autosave", "ok": False, "broken": True, "retry": again})
             self.autosave_sent = False
             return
         ok = self._may_save()

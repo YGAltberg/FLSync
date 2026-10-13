@@ -349,8 +349,16 @@ itself (flsync_content.py):
 * Bridge -> FL `autosave {ok}`: FL may save by itself. Only in a session
   with other FLs, when FL's project is the session's (a known base) and a
   writable file of its own that FL's title names, not under FL's own
-  folder. `{ok: false, broken: true}`: FL said it would save and no save
-  came within 15 s; it is never asked again in this run.
+  folder. `{ok: false, broken: true, retry}`: FL said it would save and no
+  save came within 15 s (a dialog was open, or FL was busy loading). With
+  `retry: true` the bridge offers `{ok: true}` again after 60 s; after 3
+  misses in a row `retry: false`, and it is never asked again in this run of
+  the script. A bridge before 0.14 sent no `retry`: the script gave up at once.
+* The bridge removes the copies FL's Backup folder
+  (`<user data>\FL Studio\Projects\Backup`, `<name> (overwritten on ...).flp`)
+  gets for FL's saves by itself, keeping one per project per 10 minutes: FL
+  keeps only its newest copies of all projects together (100 by default), so
+  saves every few seconds would push out everything else's.
 * FL -> bridge `autosave {content, pull}` right before FL saves by itself
   (`transport.globalTransport(FPT_Save, 1, PME_System, GT_Global)`, from
   OnIdle only, FL 26.1.7 or later, never while recording): once content > 0

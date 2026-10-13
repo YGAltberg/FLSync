@@ -218,9 +218,15 @@ class SavedTextTest(unittest.TestCase):
         self.assertEqual(flsync.saved_text({"outcome": "failed", "why": "nätet"}), "Projektet kunde inte delas: nätet.")
         self.assertEqual(flsync.names_text(["Kim", "Bo", "Cy"]), "Kim, Bo och Cy")
 
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_every_outcome_is_a_short_event(self):
+        self.assertEqual(flsync.saved_event({"outcome": "shared", "v": 4}), "Du delade version 4")
+        self.assertEqual(flsync.saved_event({"outcome": "merged", "v": 5, "with": ["Kim"]}),
+                         "Din version slogs ihop med Kims ändringar (version 5)")
+        self.assertEqual(flsync.saved_event({"outcome": "pulled", "v": 6, "with": ["Kim", "Bo"]}),
+                         "Du fick Kim och Bos ändringar (version 6)")
+        for outcome in ("switched", "old", "replaced", "unrelated", "failed"):
+            self.assertTrue(flsync.saved_event({"outcome": outcome, "v": 2, "with": ["Kim"]}))
+        self.assertIsNone(flsync.saved_event({"outcome": "unchanged"}))
 
 class AutoSyncWindowTest(LauncherTest):
     """docs/phase5.md in the window: who runs which FLSync, FL saving and
@@ -278,3 +284,23 @@ class AutoSyncWindowTest(LauncherTest):
             self.wait_for(lambda: bo.status()["update"] is not None)
         bo.post("update")
         self.assertEqual(bo.system.browsed, [flsync.RELEASES_PAGE])  # only ever FLSync's own page
+
+    def test_what_happens_in_the_session_is_told_in_plain_words(self):
+        anna = self.launcher("Anna")
+        code = self.host(anna, flv=FL26)
+        bo = self.launcher("Bo")
+        self.join(bo, code)
+        self.wait_for(lambda: any(a["text"] == "Bo anslöt" for a in anna.status()["activity"]))
+        self.assertEqual(anna.status()["summary"]["text"], "Du är värd · live med Bo")
+        self.assertTrue(any(a["text"] == "Du är med i sessionen med Anna" for a in bo.status()["activity"]))
+        app = bo.app
+        app._heard({"t": "added", "by": "Anna", "what": ["Serum 2"]})
+        for v in (2, 3, 4):  # FL saving by itself every few seconds: one line, the latest
+            app._heard({"t": "saved", "outcome": "shared", "v": v})
+        texts = [a["text"] for a in bo.status()["activity"]]
+        self.assertEqual(texts[:2], ["Du delade version 4", "Anna lade till Serum 2, som kom in live"])
+        self.assertLessEqual(len(texts), flsync.ACTIVITY_SHOWN)
+
+
+if __name__ == "__main__":
+    unittest.main()

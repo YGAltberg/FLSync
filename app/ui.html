@@ -88,6 +88,8 @@ body:not(.installing) #setup, body.installing .me { display: none !important; }
 #setup ul.what { margin: 6px 0 0; padding-left: 20px; }
 #setup ul.what li { margin: 2px 0; }
 #setup pre.log { max-height: 360px; }
+body.live #hosting { order: 1; }  /* the others are here: the invite goes below what happens */
+body.live #log-section, body.live .footer { order: 2; }
 [hidden] { display: none !important; }
 </style>
 </head>
@@ -211,6 +213,8 @@ body:not(.installing) #setup, body.installing .me { display: none !important; }
 
   <section>
     <h2>Status</h2>
+    <p id="checks-ok" hidden><span class="icon ok">✓</span> Allt fungerar
+      <button class="link small" id="checks-more">Visa detaljer</button></p>
     <ul class="checks" id="checks"></ul>
   </section>
 
@@ -229,11 +233,15 @@ body:not(.installing) #setup, body.installing .me { display: none !important; }
     </div>
   </section>
 
+  <section id="activity-box" hidden>
+    <h2>Händelser</h2>
+    <ul class="people" id="activity"></ul>
+  </section>
+
   <section id="version-box" hidden>
     <h2>Senaste versionen av projektet</h2>
-    <p class="small"><strong>Det som inte synkas live delas som versioner</strong> när FL sparar (av sig själv, eller när
-      du trycker Ctrl+S): dina ändringar går till de andra och du får deras. Har ni ändrat samtidigt slås versionerna ihop.
-      Rattar, steg och plugin-inställningar synkas direkt.</p>
+    <p class="muted small">Rattar, steg och plugin-inställningar synkas direkt. Noter, klipp, nya plugins och samples
+      delas som versioner när FL sparar, och slås ihop om ni ändrat samtidigt.</p>
     <p id="saved" class="small" hidden></p>
     <p id="version-title"></p>
     <p id="version-details" class="muted small"></p>
@@ -252,7 +260,7 @@ body:not(.installing) #setup, body.installing .me { display: none !important; }
     <p class="muted small">Hämta noter: öppna pianorullen för kanalen och kör Tools &gt; Scripts &gt; FLSync hämta noter.</p>
   </section>
 
-  <section>
+  <section id="log-section">
     <details id="log-box">
       <summary>Logg</summary>
       <pre class="log" id="log"></pre>
@@ -268,7 +276,7 @@ body:not(.installing) #setup, body.installing .me { display: none !important; }
 "use strict";
 const params = new URLSearchParams(location.search);
 const token = params.get("t") || location.hash.slice(1);
-let state = null, filledCode = false, filledPort = false, hiddenError = null;
+let state = null, filledCode = false, filledPort = false, hiddenError = null, checksOpen = false;
 
 const $ = (id) => document.getElementById(id);
 
@@ -439,6 +447,7 @@ function render(s) {
   $("host").classList.toggle("primary", s.settings.last_mode !== "join");
   $("join").classList.toggle("primary", s.settings.last_mode !== "host");
 
+  document.body.classList.toggle("live", s.mode === "host" && s.people.some((p) => !p.me));
   show("hosting", s.mode === "host");
   if (s.mode === "host") {
     const inv = s.invite;
@@ -465,7 +474,10 @@ function render(s) {
   show("joined", s.mode === "join");
   if (s.mode === "join") $("joined-text").textContent = s.joined_text || "";
 
-  // The checklist.
+  // The checklist: one line while everything works.
+  const allOk = s.checks.length > 0 && s.checks.every((c) => c.state === "ok");
+  show("checks-ok", allOk && !checksOpen);
+  show("checks", !allOk || checksOpen);
   fill($("checks"), s.checks, (c) => {
     const li = el("li");
     li.append(el("span", "icon " + c.state, ICONS[c.state] || "?"));
@@ -528,6 +540,15 @@ function render(s) {
     $("open").disabled = !v.can_open;
     $("open-folder").disabled = !v.can_open;
   }
+
+  // What happened in the session, newest first.
+  const activity = s.activity || [];
+  show("activity-box", activity.length > 0);
+  fill($("activity"), activity, (a) => {
+    const li = el("li");
+    li.append(el("span", "muted", a.time), document.createTextNode(" " + a.text));
+    return li;
+  });
 
   // Notes.
   show("notes-box", s.notes.length > 0);
@@ -603,6 +624,7 @@ $("setup-close").addEventListener("click", async (e) => {
   await act("quit", {}, e.target);
   window.close();
 });
+$("checks-more").addEventListener("click", () => { checksOpen = true; if (state) render(state); });
 $("open").addEventListener("click", (e) => act("open", {}, e.target));
 $("stop-resuming").addEventListener("click", (e) => act("leave", {}, e.target));
 $("share-mine").addEventListener("click", (e) => {

@@ -608,9 +608,12 @@ class SyncClient:
             self.waiting_hint = "FLSync: %s lämnade" % msg.get("name")
         elif kind == "autosave":
             # The bridge says whether FL may save by itself: its project is a
-            # file of the session's (`broken`: FL didn't save when asked to).
+            # file of the session's (`broken`: FL didn't save when asked to,
+            # `retry`: the bridge asks again in a while, so not given up yet).
             self.autosave_ok = msg.get("ok") is True
-            if msg.get("broken") and self.can_save:
+            if msg.get("broken") and msg.get("retry") is True:
+                self.waiting_hint = "FLSync: FL sparade inte, försöker igen om en minut"
+            elif msg.get("broken") and self.can_save:
                 self.can_save = False
                 self._tell("FL sparade inte när FLSync bad om det, så FLSync sparar inte av sig själv mer nu. "
                            "Spara med Ctrl+S för att dela det du gör.")

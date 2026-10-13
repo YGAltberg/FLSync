@@ -2,4 +2,4 @@
 (scripts/build_exe.py) and the name of each release (a tag vX.Y.Z must match
 it: .github/workflows/release.yml). Change it here, and in CHANGELOG.md."""
 
-VERSION = "0.13.0"
+VERSION = "0.14.0"

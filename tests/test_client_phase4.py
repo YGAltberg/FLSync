@@ -780,6 +780,16 @@ class AutoSaveTest(Phase4Test):
         self.tick(40, 0.1)
         self.assertEqual(self.saves(), [])
 
+    def test_an_fl_that_didnt_save_once_is_asked_again_later(self):
+        self.link.incoming.append({"t": "autosave", "ok": False, "broken": True, "retry": True})
+        self.tick()
+        self.assertTrue(self.client.can_save)  # the bridge asks again in a while (a dialog may have been open)
+        self.assertIn("FLSync: FL sparade inte, försöker igen om en minut", self.fl.project.hints)
+        self.link.incoming.append({"t": "autosave", "ok": True})
+        self.edit()
+        self.tick(40, 0.1)
+        self.assertEqual(len(self.saves()), 1)
+
 
 # --- the real script over MIDI ---------------------------------------------------------------
 

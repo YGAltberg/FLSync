@@ -64,6 +64,8 @@ Varje gång du sparar jämför FLSync tre versioner: den du utgick från, den du
 
 FLSync skriver aldrig över dina egna filer. Sessionens projekt ligger i `Dokument\Image-Line\FL Studio\Projects\FLSync\<namn>\`, och där sparar FL sedan. Varje version som ersätts där kopieras först till `Versioner` (de 20 senaste sparas). Rattar, steg och plugin-inställningar är redan lika hos alla, eftersom de synkas live.
 
+**FL:s Backup-mapp:** FL lägger en kopia av projektet i `Projects\Backup` varje gång det sparar, och behåller bara de senaste kopiorna för alla projekt sammanlagt (100 om du inte ändrat det). För att FL:s egna sparningar var några sekunder inte ska tränga ut kopiorna av dina andra projekt tar FLSync bort de kopior som dess egna sparningar gav, utom en var tionde minut. Kopior från när du själv sparar rörs aldrig.
+
 Ett projekt som inte hör till sessionen (du öppnade ett annat projekt) delas inte när andra är med, och de andra får veta att du sparade ett annat projekt. **Tryck Ctrl+S igen inom 15 sekunder** (eller klicka **Dela mitt projekt** i FLSync-fönstret), så blir ditt projekt sessionens: de andras FL öppnar det, och sparar de sitt gamla projekt öppnas ditt i stället för att de slås ihop.
 
 ## Om anslutningen bryts
@@ -100,9 +102,11 @@ Du hittar dem i pianorullens meny *Tools → Scripts*. *Run last script again* (
 
 FLSync-fönstret är hela programmet (ett eget fönster utan flikar och adressfält; Windows ritar det med Edge, som finns i alla Windows 10 och 11). Stänger du det avslutas FLSync. Det visar:
 
-- **Status:** är FL igång och hörs det, är sessionen ansluten. Saknas något säger FLSync vad du ska göra, t.ex. att starta loopMIDI, att FL måste startas om efter installationen, att MIDI-inställningarna inte stämmer, att lösenordet är fel eller att värden inte svarar.
-- **Session och inbjudan:** starta, gå med, kopiera inbjudan, gör en ny kod, lämna.
+- **Överst:** vilka du spelar med just nu (`Du är värd · live med Kim och Hannes`).
+- **Status:** en rad, `✓ Allt fungerar`, när FL hörs och sessionen är ansluten. Saknas något visas hela listan, och FLSync säger vad du ska göra, t.ex. att starta loopMIDI, att FL måste startas om efter installationen, att MIDI-inställningarna inte stämmer, att lösenordet är fel eller att värden inte svarar.
+- **Session och inbjudan:** starta, gå med, kopiera inbjudan, gör en ny kod, lämna. När de andra är med flyttas inbjudan längre ner.
 - **Deltagare** med deras FL-versioner, och vem som ändrar strukturen just nu.
+- **Händelser** med vanliga ord: vem som anslöt eller lämnade, vem som delade en version, instrument som kom in live, noter som skickades.
 - **Senaste versionen av projektet:** vem som sparade den och när, samples, plugins som saknas här och om den kräver en nyare FL, och hur din senaste sparning gick (delad, sammanslagen, ersatt). *Öppna senaste versionen* öppnar den i FL.
 - **Noter** som andra har skickat, och en logg.
 

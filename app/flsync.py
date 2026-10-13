@@ -59,6 +59,7 @@ MIDI_PORT = "FLSync"
 DEFAULT_PORT = invites.DEFAULT_PORT
 LOG_LINES = 400           # kept for the page
 LOG_SHOWN = 200           # sent to the page
+ACTIVITY_SHOWN = 8        # what happened in the session, newest first, on the page
 NOTES_SHOWN = 8
 LOOK_INTERVAL = 3.0       # how often the computer is looked at (programs, MIDI ports)
 FL_STARTUP = 45.0         # FL may take this long after starting before it is heard
@@ -173,6 +174,30 @@ def saved_text(msg):
     if outcome == "failed":
         return "Projektet kunde inte delas: %s." % (msg.get("why") or "okänt fel")
     return str(outcome)
+
+
+def saved_event(msg):
+    """The bridge's `saved` as one short line of the page's Händelser."""
+    outcome, v = msg.get("outcome"), msg.get("v")
+    others = names_text(msg.get("with"))
+    version = " %s" % v if v else ""
+    if outcome == "shared":
+        return "Du delade version%s" % version
+    if outcome == "merged":
+        return "Din version slogs ihop med %s ändringar (version%s)" % (genitive(others), version)
+    if outcome == "pulled":
+        return "Du fick %s ändringar (version%s)" % (genitive(others), version)
+    if outcome == "switched":
+        return "Ditt projekt blev sessionens (version%s)" % version
+    if outcome == "old":
+        return "%s bytte sessionens projekt, så din sparning delades inte" % capital(others)
+    if outcome == "replaced":
+        return "Din version ersatte %s: de gick inte att slå ihop" % genitive(others)
+    if outcome == "unrelated":
+        return "Det du sparade delades inte: projektet hör inte till sessionen"
+    if outcome == "failed":
+        return "Det du sparade kunde inte delas: %s" % (msg.get("why") or "okänt fel")
+    return None
 
 
 def capital(text):
@@ -474,6 +499,7 @@ class App:
         self.loaded = None           # the version FL has opened (`loaded`)
         self.saved = None            # how FL's last save went: {time, text, state}
         self.notes_seen = collections.deque(maxlen=NOTES_SHOWN)
+        self.activity = collections.deque(maxlen=ACTIVITY_SHOWN)  # {time, text, kind}: newest first
 
         # What the computer looks like (winsys), refreshed on a worker thread.
         self.look_interval = LOOK_INTERVAL
@@ -783,6 +809,15 @@ class App:
         self.peers, self.pen, self.my_name, self.link_problem = {}, None, None, None
         self.session_problem = self.saved = None
 
+    def _happened(self, text, kind=None):
+        """A line of the page's Händelser. One of the same `kind` as the newest
+        replaces it (a version shared every few seconds is one line, the latest)."""
+        entry = {"time": clock_text(time.time()), "text": text, "kind": kind}
+        if self.activity and kind is not None and self.activity[0]["kind"] == kind:
+            self.activity[0] = entry
+        elif not self.activity or self.activity[0]["text"] != text:
+            self.activity.appendleft(entry)
+
     def _heard(self, msg):
         """Something the bridge tells FL: keep the page's view of the session."""
         kind = msg.get("t")
@@ -796,16 +831,23 @@ class App:
             others = ", ".join(str(p.get("name")) for p in self.peers.values())
             self.log("Med i sessionen som %s%s" % (self.my_name, " tillsammans med " + others if others
                                                     else " (ensam än så länge)"))
+            names = [p.get("name") for p in self.peers.values()]
+            self._happened("Du är med i sessionen" + (" med %s" % names_text(names) if names else ""))
         elif kind == "peer_join" and isinstance(msg.get("id"), str):
             self.peers[msg["id"]] = msg
+            self._happened("%s anslöt" % msg.get("name"))
         elif kind == "peer_leave":
-            self.peers.pop(msg.get("id"), None)
+            gone = self.peers.pop(msg.get("id"), None) or msg
             if self.pen and self.pen.get("id") == msg.get("id"):
                 self.pen = None
+            if gone.get("name"):
+                self._happened("%s lämnade sessionen" % gone.get("name"))
         elif kind == "pen":
             self.pen = dict(msg) if msg.get("id") else None
         elif kind == "snapshot":
             key = (msg.get("v"), msg.get("from"))
+            if key not in self.seen_at and msg.get("from") != self.bridge.my_id and msg.get("by"):
+                self._happened("%s delade version %s" % (msg.get("by"), msg.get("v")), "shared:%s" % msg.get("by"))
             self.seen_at.setdefault(key, time.time())
             self.notices[key] = dict(self.notices.get(key, {}), **msg)
             for old in list(self.notices)[:-10]:
@@ -813,9 +855,20 @@ class App:
         elif kind == "loaded":
             self.loaded = msg
             self.log("FL har öppnat version %s" % msg.get("v"))
+            self._happened("FL öppnade version %s" % msg.get("v"))
         elif kind == "saved" and msg.get("outcome") != "unchanged":
             self.saved = {"time": clock_text(time.time()), "text": saved_text(msg),
                           "state": "bad" if msg.get("outcome") in ("failed", "replaced", "unrelated") else "ok"}
+            line = saved_event(msg)
+            if line:
+                self._happened(line, "saved:%s" % msg.get("outcome"))
+        elif kind == "added":
+            what = [str(w) for w in msg.get("what") or [] if w][:5]
+            self._happened("%s lade till %s, som kom in live" % (msg.get("by") or "Någon",
+                                                                names_text(what) if what else "kanaler"))
+        elif kind == "pull" and not msg.get("cancel"):
+            self._happened("%s ändringar hämtas in när du har stoppat och inte rör något"
+                           % capital(genitive(msg.get("by"))), "pull")
         elif kind == "notes":
             mine = msg.get("from") == self.bridge.my_id
             try:
@@ -825,7 +878,10 @@ class App:
             text = "%s skickade %s noter till kanal %s i mönster %s" % (
                 "Du" if mine else msg.get("by"), msg.get("n"), channel, msg.get("p"))
             self.notes_seen.appendleft({"time": clock_text(time.time()), "text": text, "mine": mine})
+            self._happened(text)
         elif kind == "link" and self.target is not None:
+            if msg.get("up") is False and self.peers:
+                self._happened("Tappade kontakten med sessionen, försöker igen", "link")
             self.link_problem = msg.get("msg")
             self.peers, self.pen = {}, None
         elif kind == "error":
@@ -1563,8 +1619,10 @@ class App:
         if not bridge.auto_sync:
             text = ("Av: det som inte synkas live delas när du sparar (Ctrl+S), och andras versioner får du med Ctrl+S "
                     "eller Öppna senaste versionen.")
-        elif bridge.autosave_broken:
+        elif bridge.autosave_failures >= bridge_mod.AUTOSAVE_TRIES:
             text = "FL sparade inte när FLSync bad om det, så det görs inte nu. Spara med Ctrl+S för att dela."
+        elif bridge.autosave_failures:
+            text = "FL sparade inte senast FLSync bad om det (en dialog var kanske öppen). FLSync försöker igen om en stund."
         elif flv and flv[:3] < AUTOSAVE_FROM:
             text = ("Din FL (%s) kan inte spara av sig själv: spara med Ctrl+S för att dela. FL 2026.1.7 eller senare "
                     "gör det automatiskt." % self.fl_hello.get("flv"))
@@ -1652,12 +1710,13 @@ class App:
         if self.mode is None:
             return {"text": "Ingen session", "state": ""}
         in_session = self.bridge.in_session()
-        others = len([p for p in people if not p["me"]])
+        others = [p["name"] for p in people if not p["me"]]
+        live = "live med %s" % (names_text(others) if len(others) <= 3 else "%d andra" % len(others))
         if self.mode == "host":
-            text = "Du är värd" + (", %d med" % others if others else "")
+            text = "Du är värd" + (" · " + live if others else ", väntar på de andra")
             return {"text": text, "state": "ok" if in_session else "wait"}
         if in_session:
-            return {"text": "Med i sessionen" + (", %d till" % others if others else ""), "state": "ok"}
+            return {"text": capital(live) if others else "Med i sessionen, ensam än så länge", "state": "ok"}
         if self.link_problem:
             return {"text": "Värden svarar inte", "state": "bad"}
         return {"text": "Ansluter ...", "state": "wait"}
@@ -1700,6 +1759,7 @@ class App:
             "resuming": {"text": "Försöker gå med i sessionen igen, som när FLSync avslutades. Värden svarar inte "
                                  "än; FLSync försöker igen av sig självt."} if self.resuming and not self.mode else None,
             "notes": list(self.notes_seen),
+            "activity": [{"time": a["time"], "text": a["text"]} for a in self.activity],
             "log": list(self.lines)[-LOG_SHOWN:],
             "settings": {"last_invite": self.settings.get("last_invite", ""),
                          "last_mode": self.settings.get("mode"), "relay_port": self.relay_port},

@@ -907,7 +907,7 @@ class SessionTest(LauncherTest):
         self.assertEqual(status["router"]["state"], "off")  # no UPnP in this test
         self.assertEqual(sorted((p["name"], p["flv"], p["me"]) for p in status["people"]),
                          [("Anna", FL25, True), ("Bo", FL26, False)])
-        self.assertEqual(status["summary"], {"text": "Du är värd, 1 med", "state": "ok"})
+        self.assertEqual(status["summary"], {"text": "Du är värd · live med Bo", "state": "ok"})
         checks = {c["id"]: c["state"] for c in status["checks"]}
         self.assertEqual((checks["relay"], checks["session"]), ("ok", "ok"))
         self.assertTrue(any("Bo anslöt" in line["text"] for line in status["log"]))  # the relay's log
@@ -917,7 +917,7 @@ class SessionTest(LauncherTest):
         self.assertIn("127.0.0.1:%d" % anna.app.relay_port, status["joined_text"])
         self.assertEqual([(p["name"], p["me"]) for p in status["people"]], [("Bo", True), ("Anna", False)])
         self.assertIn("äldre FL", status["people_note"])  # Anna can't open what Bo saves
-        self.assertEqual(status["summary"], {"text": "Med i sessionen, 1 till", "state": "ok"})
+        self.assertEqual(status["summary"], {"text": "Live med Anna", "state": "ok"})
         self.assertIn("nyare FL", anna.status()["people_note"])
 
         with open(os.path.join(bo.folder, "data", "settings.json"), encoding="utf-8") as f:

@@ -1,5 +1,13 @@
 # Ändringar
 
+## 0.14.0 – tydligare fönster, skonsamt mot FL:s backups
+
+- **Dina FL-backups trycks inte ut längre.** FL lägger en kopia av projektet i sin Backup-mapp varje gång det sparar, och behåller bara de senaste 100 kopiorna för alla projekt sammanlagt. När FL sparade av sig självt var några sekunder trängde FLSync på en kväll ut kopiorna av alla dina andra projekt. Nu tar FLSync bort kopiorna av sina egna sparningar, utom en var tionde minut. Kopior från när du själv trycker Ctrl+S rörs aldrig, och sessionens versioner finns ändå kvar i FLSync.
+- **Sparar FL inte när FLSync ber om det** (t.ex. för att en dialogruta är öppen) försöker FLSync igen efter en minut. Först efter tre missar i rad slutar det, och då står det i fönstret.
+- **Fönstret säger vad som händer, med vanliga ord:** en ny ruta Händelser visar till exempel "Kim anslöt", "Kim lade till Serum 2, som kom in live" och "Du delade version 6". Överst står vilka du spelar med ("Du är värd · live med Kim och Hannes").
+- **Status är en rad när allt fungerar** ("✓ Allt fungerar", detaljerna går att visa). Är något fel visas hela listan som förut.
+- När de andra har anslutit flyttas inbjudan ner, så att deltagarna och det som händer syns först.
+
 ## 0.13.0 – nya instrument live
 
 - **Lägger någon in ett instrument (en VST eller FL:s egna, t.ex. Serum, FLEX, Sytrus) dyker det upp hos de andra inom några sekunder**, med exakt samma inställningar, utan att projektet laddas om och även mitt i en uppspelning. FL sparar själv en sekund efter att instrumentet kom, och FLSync ger det till de andras FL som ett plugin-preset som FL lägger in sist i kanalracket. Sedan synkas dess rattar live. Testat i FL 2026.1.7 med FLEX och Serum 2: alla parametrar blev lika.

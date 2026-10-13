@@ -539,14 +539,73 @@ class AutoSyncTest(MergeSession):
         self.settle(0.3)
         self.assertEqual(self.relay.version, 2)  # nothing went back: no ping-pong of versions
 
-    def test_an_fl_that_didnt_save_when_it_said_so_isnt_asked_again(self):
+    def test_an_fl_that_didnt_save_when_it_said_so_is_asked_again_later(self):
         self.start()
         self.show(self.bo, self.written)
         self.wait_for(lambda: self.said(self.bo, {"t": "autosave", "ok": True}))
-        with mock.patch.object(bridge_mod, "AUTOSAVE_CHECK", 0.3):
+        with mock.patch.object(bridge_mod, "AUTOSAVE_CHECK", 0.3), mock.patch.object(bridge_mod, "AUTOSAVE_RETRY", 0.5):
             self.bo_fl.send({"t": "autosave", "content": 1, "pull": False})  # then a dialog came instead
-            self.wait_for(lambda: self.said(self.bo, {"t": "autosave", "ok": False, "broken": True}))
-        self.assertTrue(any("FL sparade inte" in line for line in self.bo.logs))
+            self.wait_for(lambda: self.said(self.bo, {"t": "autosave", "ok": False, "broken": True, "retry": True}))
+            self.assertTrue(any("försöker igen" in line for line in self.bo.logs))
+            self.bo.sent.clear()
+            self.wait_for(lambda: self.said(self.bo, {"t": "autosave", "ok": True}))  # the dialog may be gone
+            # A save by itself that happens counts again from nothing.
+            self.bo_fl.send({"t": "autosave", "content": 1, "pull": False})
+            snaps.save(self.written, touch(change_note(self.bo_content, 1, 52), 3))
+            self.wait_for(lambda: self.relay.version == 2)
+            self.assertEqual(self.bo.bridge.autosave_failures, 0)
+
+    def test_an_fl_that_never_saves_when_it_said_so_isnt_asked_any_more(self):
+        self.start()
+        self.show(self.bo, self.written)
+        self.wait_for(lambda: self.said(self.bo, {"t": "autosave", "ok": True}))
+        with mock.patch.object(bridge_mod, "AUTOSAVE_CHECK", 0.2), mock.patch.object(bridge_mod, "AUTOSAVE_RETRY", 0.2):
+            for attempt in range(bridge_mod.AUTOSAVE_TRIES):
+                self.wait_for(lambda: self.said(self.bo, {"t": "autosave", "ok": True}))
+                self.bo.sent.clear()
+                self.bo_fl.send({"t": "autosave", "content": 1, "pull": False})
+                broken = {"t": "autosave", "ok": False, "broken": True, "retry": attempt < bridge_mod.AUTOSAVE_TRIES - 1}
+                self.wait_for(lambda: self.said(self.bo, broken))
+            self.bo.sent.clear()
+            self.settle(0.6)
+        self.assertFalse(self.said(self.bo, {"t": "autosave", "ok": True}))
+        self.assertTrue(any("ber inte om det mer" in line for line in self.bo.logs))
+
+    def backup(self, link, name, age=0.0):
+        """A copy in FL's Backup folder, as FL makes one for each save; `age` seconds old."""
+        path = snaps.save(os.path.join(link.bridge.fl_dirs["user_dir"], "FL Studio", "Projects", "Backup", name),
+                          snaps.make_project(title="kopia"))
+        when = time.time() - age  # (snaps.save gives files a time of its own)
+        os.utime(path, (when, when))
+        return path
+
+    def test_fls_backup_copies_of_saves_by_itself_are_thinned(self):
+        # FL keeps its newest 100 copies of all projects: FL saving by itself
+        # every few seconds would push out the copies of everything else.
+        self.start()
+        anna = self.anna
+        mine = self.backup(anna, "Beat (overwritten on 2026-10-01 at 12h00).flp", age=3600)  # a save of the user's own
+        other = self.backup(anna, "Annat (overwritten on 2026-10-13 at 19h37).flp")         # another project's
+        first = self.backup(anna, "Beat (overwritten on 2026-10-13 at 19h37).flp")
+        self.anna_fl.send({"t": "autosave", "content": 1, "pull": False})
+        snaps.save(self.project, touch(change_note(self.song, 1, first_note_key(self.song, 1) + 1), 2))
+        self.wait_for(lambda: self.relay.version == 2)
+        self.assertTrue(os.path.isfile(first))  # one copy of a save by itself per BACKUP_EVERY stays
+        second = self.backup(anna, "Beat (overwritten on 2026-10-13 at 19h37)_2.flp")
+        self.anna_fl.send({"t": "autosave", "content": 1, "pull": False})
+        snaps.save(self.project, touch(change_note(self.song, 1, first_note_key(self.song, 1) + 2), 3))
+        self.wait_for(lambda: self.relay.version == 3)
+        self.assertFalse(os.path.exists(second))
+        self.assertTrue(all(os.path.isfile(path) for path in (mine, other, first)))
+        self.assertTrue(any("Backup-mapp" in line for line in anna.logs))
+
+    def test_fls_backup_copy_of_a_save_of_the_users_own_stays(self):
+        self.start()
+        self.anna.bridge.backups_kept["beat"] = (time.time(), "x.flp")  # a copy of a save by itself was kept just now
+        copy = self.backup(self.anna, "Beat (overwritten on 2026-10-13 at 19h38).flp")
+        snaps.save(self.project, touch(change_note(self.song, 1, first_note_key(self.song, 1) + 1), 2))  # Ctrl+S
+        self.wait_for(lambda: self.relay.version == 2)
+        self.assertTrue(os.path.isfile(copy))
 
 
 class KeepaliveTest(snaps.Session):
