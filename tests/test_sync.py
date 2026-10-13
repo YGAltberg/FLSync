@@ -9,7 +9,7 @@ import unittest
 from unittest import mock
 
 from fake_fl import FakeFL
-from harness import BridgeLink, LoopThread, RawClient, RelayServer, bridge_mod, free_port, pump
+from harness import BridgeLink, LoopThread, RawClient, RelayServer, bridge_mod, free_port, pump, relay_mod
 
 
 def shared_keys(fl):
@@ -283,6 +283,22 @@ class SyncTest(unittest.TestCase):
             self.wait_for(lambda: b.client.peers and a.client.joined, timeout=15)
         b.set_volume(6, 0.45)
         self.wait_for(lambda: a.volume(6) == 0.45, timeout=15)
+
+    def test_a_big_welcome_is_waited_for(self):
+        # A long session's state takes seconds over MIDI: FL must not say hello
+        # again meanwhile, and the bridge must not join again for it (that made
+        # FL join over and over, never in step).
+        with RawClient(self.port, "Monitor") as m:
+            pairs = [["pl/%d/n" % track, "Spår med ett långt namn nummer %d" % track] for track in range(1, 501)]
+            for start in range(0, len(pairs), 250):
+                m.send({"t": "sets", "l": start, "kv": pairs[start:start + 250]})
+                m.recv_kind("ack")
+            joins = []
+            with mock.patch.object(relay_mod, "log", joins.append):
+                a = self.fl("A")
+                self.wait_for(lambda: a.client.joined, timeout=40)  # (as the first FL it keeps its own names)
+                self.settle(1.0)
+        self.assertEqual(len([line for line in joins if line.startswith("A anslöt")]), 1, joins)
 
     def test_without_a_bridge_fl_just_waits(self):
         lonely = self.fl("Ensam", bridge=False)

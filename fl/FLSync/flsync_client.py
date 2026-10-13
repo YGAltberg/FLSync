@@ -51,6 +51,7 @@ try:
 except ImportError:  # every FL with scripting has it; without it the bridge just doesn't hear if FL plays
     transport = None
 
+import flsync_content
 from flsync_binding import ALL
 from flsync_log import log
 
@@ -77,6 +78,12 @@ LOAD_SETTLE = 3.0               # FL's changed flag settles this long after a pr
 STALL_TIME = 2.0                # this long between ticks: FL itself was busy (a plugin or project loading)
 RESYNC_INTERVAL = 30.0          # after MIDI from the bridge got lost, ask for the session's values at most this often
 ERROR_LOG_INTERVAL = 30.0       # an area that keeps failing (a plugin still loading) says so at most this often
+# Content (flsync_content.py): what live sync can't carry goes out as versions FL saves by itself.
+CONTENT_WINDOW = 1.0            # an undo step this close to a live change is that change, not content
+AUTOSAVE_QUIET = 2.0            # FL saves by itself once nothing changed here for this long...
+AUTOSAVE_INTERVAL = 5.0         # ...and at most this often
+PULL_IDLE = 2.0                 # someone else's version is loaded once nothing changed here for this long,
+PULL_COUNTDOWN = 3.0            # ...and FL said so this long before
 # The part of the structure fingerprint (flsync_structure.py) each key prefix
 # depends on: "c" the channels, "m" the mixer. Others (song, transport,
 # playlist tracks, patterns) mean the same in every structure.
@@ -261,6 +268,18 @@ class SyncClient:
         self.next_resync = 0.0
         self.failing = {}        # binding -> when its next failure may be reported
         self.told_capabilities = False
+        # Content: edits live sync can't carry, saved by FL itself (flsync_content.py).
+        self.content = 0         # such edits since the last save or load
+        self.undo_steps = []     # when undo steps came that may be content: decided CONTENT_WINDOW later
+        self.live_times = []     # when live values changed here lately, ours or someone else's
+        self.local_at = float("-inf")  # the last edit here of any kind
+        self.marks = None        # flsync_content.marks() at the last look
+        self.can_save = flsync_content.can_save(_version_tuple(self.flv))
+        self.autosave_ok = False  # the bridge's say: FL's project is a file of the session's
+        self.next_autosave = 0.0
+        self.pull = None         # {by, v}: the bridge wants someone's newer version in FL
+        self.pull_at = None      # when the countdown to that ends
+        self.from_idle = True    # this tick came from OnIdle (FL may be asked to save only then)
 
     # --- driven by FL's callbacks -----------------------------------------
 
@@ -273,11 +292,13 @@ class SyncClient:
 
     def on_midi(self, status, data1, data2, now):
         if self.link.receive(status, data1, data2, now):
-            self.idle(now)
+            self.idle(now, from_idle=False)
 
-    def idle(self, now):
+    def idle(self, now, from_idle=True):
         if now - self.last_tick >= MIN_TICK_INTERVAL:
+            self.from_idle = from_idle
             self.tick(now)
+            self.from_idle = True
 
     def tick(self, now):
         since, self.last_tick = now - self.last_tick, now
@@ -306,6 +327,7 @@ class SyncClient:
         if not self.loading and now >= self.next_status:
             self.next_status = now + STATUS_INTERVAL
             self._read_status(now)
+            self._look_for_content(now)
         if self.link.alive(now):
             self._bridge_present(now)
         elif self.bridge_seen:
@@ -337,6 +359,7 @@ class SyncClient:
                 if self.pause_reason and now >= self.next_pause_hint:
                     self.next_pause_hint = now + PAUSE_HINT_INTERVAL
                     self.waiting_hint = self.pause_reason
+                self._save_by_itself(now)
         self._show_hint(now)
         self.link.flush()
         if self.link.busy():
@@ -355,6 +378,8 @@ class SyncClient:
             self._mark(b, b.on_dirty_channel(index, flag))
 
     def on_refresh(self, flags):
+        if flags & flsync_content.UNDO:
+            self.undo_steps.append(self.last_tick)  # an edit (or undo): content unless a live value changed
         for b in self.bindings:
             self._mark(b, b.on_refresh(flags))
 
@@ -365,6 +390,7 @@ class SyncClient:
         self.loading = False
         self.inbox.clear()
         self.hold_until, self.held_back = None, False  # the version the bridge opened (or another project): see below
+        self._forget_content()                # the project as loaded has it all
         self.status = self.last_flag = None   # a load leaves FL unchanged: that's no save
         self.loaded = True                    # ... nor is the flag settling right after it (measured in FL 2025)
         self.offline_base.clear()             # edits of the project that was open
@@ -420,6 +446,8 @@ class SyncClient:
             if context is not None and context != self.sent_context:
                 self.sent_context = context
                 self.link.send({"t": "pr", "p": context[0], "c": context[1], "n": context[2]})
+        if self.link.receiving():
+            self.next_hello = max(self.next_hello, now + WELCOME_TIMEOUT)  # maybe the welcome: let it come
         if not self.joined and now >= self.next_hello:
             hello = {"t": "hello", "proto": PROTO, "app": "fl", "name": self.name,
                      "api": api_version(), "fp": self.my_fp}
@@ -455,6 +483,7 @@ class SyncClient:
         merged version. Our own changes still go out meanwhile."""
         if flag == 0 and self.last_flag and self.joined and not self.loading and now >= self.saves_from:
             self.hold_until = max(self.hold_until or now, now + HOLD_TIMEOUT)
+            self.content, self.undo_steps = 0, []  # the save has it: the bridge shares it
             if self.debug:
                 log("du sparade: de andras värden väntar tills bryggan har delat sparningen")
         self.last_flag = flag
@@ -555,6 +584,20 @@ class SyncClient:
             self.peers.pop(msg.get("id"), None)
             log("%s lämnade sessionen" % msg.get("name"))
             self.waiting_hint = "FLSync: %s lämnade" % msg.get("name")
+        elif kind == "autosave":
+            # The bridge says whether FL may save by itself: its project is a
+            # file of the session's (`broken`: FL didn't save when asked to).
+            self.autosave_ok = msg.get("ok") is True
+            if msg.get("broken") and self.can_save:
+                self.can_save = False
+                self._tell("FL sparade inte när FLSync bad om det, så FLSync sparar inte av sig själv mer nu. "
+                           "Spara med Ctrl+S för att dela det du gör.")
+                self.waiting_hint = "FLSync: spara med Ctrl+S för att dela det du gör"
+        elif kind == "pull":
+            # Someone shared a version FL hasn't got: it is saved and merged in
+            # once FL is stopped and nothing changes here (_save_by_itself).
+            self.pull = msg if not msg.get("cancel") else None
+            self.pull_at = None
         elif kind == "note":
             if msg.get("kind") == "unrelated":
                 log("%s sparade '%s', som inte är sessionens projekt. Det delas om hen sparar igen inom kort."
@@ -792,6 +835,7 @@ class SyncClient:
                 before = self.shadow.get(key, _MISSING)
                 if before != value:
                     self.shadow[key] = value
+                    self._edited(key, now)
                     if send and self._key_ok(key):
                         changes.append((key, value))
                         if not b.transient(key):
@@ -868,6 +912,7 @@ class SyncClient:
             return
         self.shadow[key] = actual
         self.settling[key] = now + SETTLE_TIME
+        self.live_times.append(now)  # (FL may count our write as an undo step: that's no content)
         if sender is not None and announce:
             who = self.peers.get(sender, {}).get("name") or "någon"
             self.waiting_hint = "%s: %s" % (who, binding.describe(key))
@@ -877,6 +922,85 @@ class SyncClient:
             self.hint(self.waiting_hint)
             self.waiting_hint = None
             self.next_hint = now + HINT_INTERVAL
+
+    # --- content (flsync_content.py) ---------------------------------------------------
+
+    def _edited(self, key, now):
+        """A change was seen here: a live value (a key that means the same in
+        the session), or else content, which only a saved version can carry."""
+        self.local_at = max(self.local_at, now)
+        if key is not None and self._key_ok(key):
+            self.live_times.append(now)
+        else:
+            self.content += 1
+
+    def _look_for_content(self, now):
+        """Edits of the playlist, of notes, of plugins' insides show only as
+        undo steps (OnRefresh too), more patterns or a longer song. An undo step
+        is content once CONTENT_WINDOW has shown no live change around it."""
+        marks = flsync_content.marks()
+        if self.marks is not None:
+            if marks[0] != self.marks[0]:
+                self.undo_steps.append(now)
+            if marks[1:] != self.marks[1:]:
+                self._edited(None, now)
+        self.marks = marks
+        self.live_times = [t for t in self.live_times if now - t <= 2 * CONTENT_WINDOW + STATUS_INTERVAL]
+        waiting = []
+        for at in self.undo_steps:
+            if now - at < CONTENT_WINDOW:
+                waiting.append(at)
+            elif not any(abs(t - at) <= CONTENT_WINDOW for t in self.live_times):
+                self._edited(None, at)
+        self.undo_steps = waiting
+
+    def _forget_content(self):
+        self.content, self.undo_steps, self.marks = 0, [], None
+        self.pull = self.pull_at = None
+
+    def _save_by_itself(self, now):
+        """Content goes out without Ctrl+S: FL saves by itself once nothing has
+        changed here for AUTOSAVE_QUIET, and the bridge shares the save as for
+        Ctrl+S. For someone else's newer version (`pull`) FL saves once it is
+        stopped and nothing has changed for PULL_IDLE, after a countdown in the
+        hint bar: the bridge merges the save with that version and opens it,
+        so nothing of ours is lost."""
+        if not (self.can_save and self.autosave_ok and self.from_idle) or self.hold_until is not None:
+            return
+        if not self._other_fls() or now < self.next_autosave or self.link.busy():
+            return
+        quiet = now - self.local_at
+        if self.pull is not None:
+            if is_playing() or flsync_content.recording() or quiet < PULL_IDLE:
+                self.pull_at = None  # not while it plays or someone works here
+            elif self.pull_at is None:
+                self.pull_at = now + PULL_COUNTDOWN
+                self.waiting_hint = "FLSync: hämtar %s ändringar om %d s" % (
+                    _genitive(_who(self.pull.get("by"))), PULL_COUNTDOWN)
+            elif now >= self.pull_at:
+                self._save_now(now, pull=True)
+            return
+        if self.content and quiet >= AUTOSAVE_QUIET and not flsync_content.recording():
+            self._save_now(now, pull=False)
+
+    def _save_now(self, now, pull):
+        if not _safe_to_edit() or flsync_content.in_menu():
+            return  # FL is in a menu or a dialog: next time
+        self.next_autosave = now + AUTOSAVE_INTERVAL
+        self.pull = self.pull_at = None
+        # The bridge must hear it before FL saves (which holds FL up), to tell
+        # this save from a Ctrl+S: it shares one with nothing new quietly.
+        self.link.send({"t": "autosave", "content": self.content, "pull": pull})
+        self.link.flush()
+        self.content, self.undo_steps = 0, []  # in this save (if FL doesn't, the bridge says so: `broken`)
+        if not flsync_content.save():
+            self.can_save = False
+            self._tell("FL kunde inte spara av sig självt, så FLSync gör inte det mer nu. Spara med Ctrl+S för att "
+                       "dela det du gör.")
+            return
+        if self.debug:
+            log("FL sparar av sig självt (%s)" % ("för att hämta de andras version" if pull
+                                                  else "%d ändringar som inte synkas live" % self.content))
 
     # --- structure ----------------------------------------------------------------
 
@@ -927,6 +1051,8 @@ class SyncClient:
         pause or resume. `load`: because of what we opened, not an edit."""
         was_ok, self.my_fp = self._ok_areas(), fp
         lost, gained = was_ok - self._ok_areas(), self._ok_areas() - was_ok
+        if not load:
+            self._edited(None, self.last_tick)  # channels or plugins added, removed or replaced: content
         if lost:  # others' values not written yet: made for what the numbers meant before
             self.inbox = {k: v for k, v in self.inbox.items() if key_area(k) not in lost}
         if not self.joined:
@@ -1020,6 +1146,11 @@ class SyncClient:
                 "Det öppnas nu." if msg.get("how") is None else "Spara ditt (Ctrl+S), så öppnas det."))
             self.waiting_hint = "FLSync: %s bytte projekt till %s%s" % (
                 _who(msg.get("by")), _shown(msg.get("name")), "" if msg.get("how") is None else ", tryck Ctrl+S")
+        elif saved and self.can_save and self.autosave_ok:
+            # FL saves by itself and gets it in (_save_by_itself, with the bridge's `pull`).
+            log("%s har sparat. Ändringarna hämtas in när uppspelningen är stoppad och du inte ändrar något "
+                "(eller nu med Ctrl+S)." % _who(msg.get("by")))
+            self.waiting_hint = "FLSync: %s har sparat, hämtas in när du stoppar" % _who(msg.get("by"))
         elif saved:
             log("spara (Ctrl+S) för att få med %s ändringar i ditt projekt" % _genitive(_who(msg.get("by"))))
             self.waiting_hint = "FLSync: %s har sparat, tryck Ctrl+S för att få med ändringarna" % _who(msg.get("by"))

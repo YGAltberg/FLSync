@@ -24,8 +24,10 @@ OTHER_FP = "0123456789ab"
 
 
 class Phase4Test(unittest.TestCase):
+    FL_OPTIONS = {}
+
     def setUp(self):
-        self.fl = FakeFL("A")
+        self.fl = FakeFL("A", **self.FL_OPTIONS)
         self.link = FakeLink()
         self.client = self.fl.script.SyncClient(
             "A", self.fl.script.make_bindings(), self.link,
@@ -632,6 +634,107 @@ class SnapshotHowTest(Phase4Test):
         self.shown("FLSync: kanalerna och mixern pausade, öppna Jonas version av projektet")
         self.notice(4, OTHER_FP, None, by="Max", sender="c4")
         self.shown("FLSync: kanalerna och mixern pausade, öppna Max version av projektet")
+
+
+class AutoSaveTest(Phase4Test):
+    """docs/phase5.md: what live sync can't carry goes out in saves FL makes by
+    itself, and someone else's version comes in through such a save."""
+
+    FL_OPTIONS = {"fl_version": (26, 1, 7, 5653)}
+
+    def setUp(self):
+        super().setUp()
+        self.join()
+        self.link.incoming.append({"t": "autosave", "ok": True})
+        self.tick()
+        self.song = self.fl.project.song
+        self.asked = 0
+
+    def edit(self):
+        """An edit only a saved version carries (a clip placed): an undo step, no live value."""
+        self.fl.project.undo += 1
+
+    def saves(self):
+        """What the bridge was told about saves FL makes by itself since the last look (and FL was asked to)."""
+        taken = self.link.take("autosave")
+        self.assertEqual(self.fl.project.save_requests - self.asked, len(taken))
+        self.asked = self.fl.project.save_requests
+        return taken
+
+    def test_an_edit_live_sync_cant_carry_is_saved_by_itself(self):
+        self.edit()
+        self.tick(15, 0.1)
+        self.assertEqual(self.saves(), [])  # not while the user may still be at it
+        self.tick(30, 0.1)
+        self.assertEqual(self.saves(), [{"t": "autosave", "content": 1, "pull": False}])
+        calls = [c for c in self.song.calls if c[0] == "globalTransport"]
+        self.assertEqual(calls, [("globalTransport", 92, 1, 8)])  # FPT_Save, as the main window's Ctrl+S
+        self.tick(100, 0.1)
+        self.assertEqual(self.saves(), [])  # once: until something else changes
+
+    def test_a_live_change_is_no_content(self):
+        self.edit()
+        self.fl.set_volume(2, 0.4)  # the undo step was this fader: the others have it already
+        self.tick(60, 0.1)
+        self.assertEqual(self.saves(), [])
+        self.assertEqual(self.client.content, 0)
+
+    def test_more_patterns_or_a_longer_song_is_content(self):
+        self.song.length += 4  # a clip placed after the end
+        self.tick(40, 0.1)
+        self.assertEqual(len(self.saves()), 1)
+
+    def test_not_while_recording_nor_without_the_bridges_say(self):
+        self.song.recording = True
+        self.edit()
+        self.tick(40, 0.1)
+        self.assertEqual(self.saves(), [])
+        self.song.recording = False
+        self.link.incoming.append({"t": "autosave", "ok": False})  # e.g. a new project without a file
+        self.tick(40, 0.1)
+        self.assertEqual(self.saves(), [])
+        self.link.incoming.append({"t": "autosave", "ok": True})
+        self.tick(40, 0.1)
+        self.assertEqual(len(self.saves()), 1)
+
+    def test_a_save_of_the_users_own_has_it_already(self):
+        self.edit()
+        self.tick(12, 0.1)
+        self.fl.project.changed_flag = 1
+        self.tick(2, 0.1)
+        self.fl.project.changed_flag = 0  # Ctrl+S
+        self.tick(40, 0.1)
+        self.assertEqual(self.saves(), [])
+
+    def test_only_fl_2026_from_26_1_7_saves_by_itself(self):
+        can_save = self.module.flsync_content.can_save
+        self.assertEqual([can_save(v) for v in ((25, 2, 4), (26, 1, 6), (26, 1, 7), (27, 0, 0), None)],
+                         [False, False, True, True, False])
+
+    def test_someone_elses_version_comes_in_once_fl_is_stopped_and_idle(self):
+        self.song.playing = self.song.playing_real = True
+        self.link.incoming.append({"t": "pull", "by": "Kim", "v": 3})
+        self.tick(40, 0.1)
+        self.assertEqual(self.saves(), [])  # never while it plays: loading would stop it
+        self.song.playing = self.song.playing_real = False  # stopping is a change here too
+        self.tick(25, 0.1)
+        self.assertIn("FLSync: hämtar Kims ändringar om 3 s", self.fl.project.hints)
+        self.tick(5, 0.1)
+        self.fl.set_volume(3, 0.7)  # someone works here: the countdown starts over
+        self.tick(40, 0.1)
+        self.assertEqual(self.saves(), [])
+        self.tick(20, 0.1)
+        self.assertEqual(self.saves(), [{"t": "autosave", "content": 0, "pull": True}])
+
+    def test_an_fl_that_didnt_save_isnt_asked_again(self):
+        self.link.incoming.append({"t": "autosave", "ok": False, "broken": True})
+        self.tick()
+        self.assertFalse(self.client.can_save)
+        self.assertIn("FLSync: spara med Ctrl+S för att dela det du gör", self.fl.project.hints)
+        self.link.incoming.append({"t": "autosave", "ok": True})
+        self.edit()
+        self.tick(40, 0.1)
+        self.assertEqual(self.saves(), [])
 
 
 # --- the real script over MIDI ---------------------------------------------------------------

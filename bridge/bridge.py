@@ -47,12 +47,15 @@ import wire
 
 PROTO = 2                   # of the files connection; FL's session says its own in its hello
 PUMP_INTERVAL = 0.01        # seconds between rounds of MIDI in and out
-EVENTS_PER_PUMP = 60        # one event per byte; this paces bursts so they don't flood FL
+EVENTS_PER_SECOND = 4000    # one event per byte: what FL takes in (about 4 kB/s, docs/protocol_v2.md)...
+EVENT_BURST = 120           # ...with a short burst. Paced by the clock, not per round: Windows wakes the
+                            # loop at 15.6 ms, or at once when anything else happens
 HEARTBEAT_INTERVAL = 0.03   # also clocks the FL script
 FL_TIMEOUT = 5.0            # FL silent this long is busy (loading, saving, a dialog) while its window is open...
 FL_GONE = 120.0             # ...and counts as gone after this long, or as soon as its window is closed
 FL_CHECK_INTERVAL = 1.0     # how often a silent FL's window is looked for
 CONFIRM_TIME = 15.0         # saving a project that isn't the session's again within this makes it everyone's
+AUTOSAVE_CHECK = 15.0       # FL asked to save by itself (`autosave`) and no save seen within this: it can't
 CONNECT_TIMEOUT = 5.0
 MIDI_RETRY = 2.0            # seconds between attempts to (re)open the MIDI ports
 MAX_LINE = 64 << 20         # the welcome holds the session's whole state and its stored notes
@@ -601,6 +604,15 @@ def file_key(path):
     return os.path.normcase(os.path.abspath(path))
 
 
+def inside_folder(path, folder):
+    """Whether `path` is somewhere inside `folder` (any case, links followed)."""
+    try:
+        folder = os.path.normcase(os.path.realpath(folder))
+        return os.path.commonpath([folder, os.path.normcase(os.path.realpath(path))]) == folder
+    except (OSError, ValueError):
+        return False
+
+
 async def replace(source, target, tries=5):
     """os.replace, a few times: on Windows a virus scanner may hold a new file for a moment."""
     for attempt in range(tries):
@@ -814,7 +826,7 @@ class Bridge:
     def __init__(self, relay_host, relay_port, send_to_fl, logger=log, name=None, project=None, mru=None,
                  cache_dir=None, projects_dir=None, notes_dir=None, plugin_db=None, fl_dirs=None,
                  auto_open=False, opener=None, password=None, fl_title=None, state_path=None, open_merged=True,
-                 flp_writes=None, mru_all=None, fl_open=None):
+                 flp_writes=None, mru_all=None, fl_open=None, auto_sync=True):
         self.relay_host = relay_host
         self.relay_port = relay_port
         self.send_to_fl = send_to_fl
@@ -823,11 +835,15 @@ class Bridge:
         self.password = password or None  # the session's, if the relay has one
         self.incoming = collections.deque()
         self.outgoing = collections.deque()  # (kind, data1) parts, numbered when sent
+        self.tokens, self.paced_at = float(EVENT_BURST), None  # what may go out now (pump_once)
+        self.queued = self.sent = 0  # parts put in outgoing / sent, ever
+        self.welcome_end = 0     # `queued` after the welcome: it is on its way to FL until `sent` gets there
         self.encoder = wire.Encoder(wire.TO_FL)
         self.decoder = wire.Decoder(wire.FROM_FL)
         self.session = None  # task running the current relay connection
         self.writer = None
         self.fl_name = None
+        self.hello_name = None    # the name in FL's last hello, before --name
         self.fl_last_heard = None
         self.fl_open = fl_window_open if fl_open is None else fl_open  # whether FL's window is open (fl_window_open)
         self.fl_busy = False      # FL is silent but its window is open: it stays in the session for now
@@ -920,6 +936,14 @@ class Bridge:
         self.unrelated = False   # FL's project isn't the session's: its saves aren't shared
         self.unrelated_at = None  # when such a save was refused: saving again within CONFIRM_TIME shares it
         self.last_saved = None   # the outcome of the last save, for the launcher's page
+
+        # Content without Ctrl+S (docs/phase5.md): FL saves by itself, a save with
+        # nothing new isn't shared, and others' versions come in through a save.
+        self.auto_sync = auto_sync
+        self.autosave_sent = None  # what FL last heard: may it save by itself
+        self.autosave = None     # {at, content, pull, seen}: FL said it saves by itself now
+        self.autosave_broken = False  # FL didn't save when it said it would: never asked again
+        self.pull_sent = None    # the version FL was asked to get in (`pull`)
         self._load_state()
 
     # --- from FL -----------------------------------------------------------
@@ -949,8 +973,14 @@ class Bridge:
         elif kind == "hello":
             self.fl_fp = fingerprint(msg.get("fp"))
             self.fl_version = fl_version(msg.get("flv"))
+            self.autosave_sent = self.pull_sent = None  # a new run of the script hears them again
             self._start_session(msg)
             self._reported("hello")
+        elif kind == "autosave":
+            # FL saves by itself right after this: that save is told apart (_share_now).
+            content = msg.get("content")
+            self.autosave = {"at": now, "content": content if is_int(content) else 1, "pull": msg.get("pull") is True,
+                             "seen": False}
         elif kind == "pr":
             self._on_pr(msg)  # for the piano roll scripts; the relay never hears it
         elif kind == "st":
@@ -973,7 +1003,11 @@ class Bridge:
     # --- to FL -------------------------------------------------------------
 
     def to_fl(self, msg):
-        self.outgoing.extend(wire.parts(wire.to_ascii_payload(msg)))
+        parts = wire.parts(wire.to_ascii_payload(msg))
+        self.outgoing.extend(parts)
+        self.queued += len(parts)
+        if msg.get("t") == "welcome":
+            self.welcome_end = self.queued
 
     def _from_relay(self, line):
         try:
@@ -1044,13 +1078,23 @@ class Bridge:
 
     def _start_session(self, hello):
         """FL said hello: (re)join the relay on its behalf."""
-        if self.session is not None and not self.session.done() and self.writer is None:
-            return  # still connecting for the previous hello; its welcome will answer this one too
+        if self.session is not None and not self.session.done():
+            if self.writer is None:
+                return  # still connecting for the previous hello; its welcome will answer this one too
+            if self.my_id is not None and self.sent < self.welcome_end and hello.get("name") == self.hello_name:
+                # FL asked again while its welcome is still on the way (a big
+                # session takes seconds over MIDI): that welcome answers it.
+                return
+        self.hello_name = hello.get("name")
         if self.name:
             hello = dict(hello, name=self.name)
         if self.password:
             hello = dict(hello, pw=self.password)
         self.close_session()
+        # What was on its way to FL belongs to the session it just left (a
+        # welcome, values): the new one sends what FL needs.
+        self.outgoing.clear()
+        self.welcome_end = self.queued = self.sent = 0
         self.fl_name = hello.get("name")
         self.session = asyncio.ensure_future(self._run_session(hello))
 
@@ -1154,9 +1198,15 @@ class Bridge:
         if now >= self.next_heartbeat:
             self.send_to_fl(self.encoder.heartbeat())
             self.next_heartbeat = now + HEARTBEAT_INTERVAL
+        clock = time.perf_counter()  # (time.monotonic() moves in 15.6 ms steps on Windows)
+        if self.paced_at is not None:
+            self.tokens = min(float(EVENT_BURST), self.tokens + (clock - self.paced_at) * EVENTS_PER_SECOND)
+        self.paced_at = clock
         if not self.fl_busy:  # a busy FL reads nothing: messages wait here rather than in the MIDI driver
-            for _ in range(min(EVENTS_PER_PUMP, len(self.outgoing))):
+            for _ in range(min(int(self.tokens), len(self.outgoing))):
                 self.send_to_fl(self.encoder.event(*self.outgoing.popleft()))
+                self.tokens -= 1
+                self.sent += 1
         heard = self.fl_last_heard
         if heard is None or now - heard <= FL_TIMEOUT:
             return
@@ -1218,6 +1268,8 @@ class Bridge:
         if now >= self.next_project:
             self.next_project = now + self.project_interval
             self._watch_project(now)
+            self._offer_autosave(now)
+            self._check_pull()
         self._watch_outbox(now)
         if self.pr is not None and now >= self.next_context:
             self._write_context()
@@ -1367,6 +1419,8 @@ class Bridge:
                                               or time.time() - stat[0] / 1e9 < SAVE_AS_WINDOW)
                 if saved and not ours:
                     self.changed_at = now
+                    if self.autosave is not None:
+                        self.autosave["seen"] = True
                     if self.base is not None:
                         self._set_base(self.base, path)
                 elif ours or self.base_project is None or not same_file(path, self.base_project):
@@ -1382,6 +1436,8 @@ class Bridge:
                 self.watched_stat = stat  # a version written here (FL had it open): no save to tell FL about
                 return
             self.watched_stat, self.changed_at = stat, now  # FL is saving it: wait until it's done
+            if self.autosave is not None:
+                self.autosave["seen"] = True  # FL did save when it said it would
             return
         if self.changed_at is None or now - self.changed_at < self.stable_time or now < self.retry_at:
             return
@@ -1422,6 +1478,7 @@ class Bridge:
             self.log("Kunde inte läsa %s: %s" % (path, e))
             return False
         sha = hashlib.sha256(data).hexdigest()
+        auto, self.autosave = self.autosave, None  # FL saved by itself (docs/phase5.md)
         if sha == self.last_sha or sha == self.unshareable:
             self._tell_saved("unchanged")
             return True  # nothing new: saved without changes, or the version we wrote ourselves
@@ -1457,6 +1514,8 @@ class Bridge:
             return True
         mine = {"path": path, "name": name, "data": data, "sha": sha, "project": project, "samples": samples,
                 "tokens": {s["path"]: s["h"] for s in samples if not s.get("plugin")}}
+        if auto is not None and not self.force_share and await self._nothing_new(mine, auto):
+            return await self._settle(mine, self.newest)
         force, self.force_share = self.force_share, False
         for _ in range(SHARE_TRIES):
             if not self.in_session() or self.fl_fp is None:
@@ -1471,9 +1530,9 @@ class Bridge:
             elif newest is None or newest["flp"] == self.base:
                 done = await self._share_mine(mine, newest, "shared")  # nobody else shared since: fast forward
             elif newest.get("switch") and newest["flp"] not in self.shared:
-                done = await self._not_ours(mine, newest)  # a save of the project the session left: FL opens the new
+                done = await self._not_ours(mine, newest, quiet=auto is not None)  # a save of the project the session left: FL opens the new
             elif self.base is None and self._other_fls():
-                done = await self._not_ours(mine, newest)
+                done = await self._not_ours(mine, newest, quiet=auto is not None)
             elif self.base is None:
                 done = await self._share_mine(mine, newest, "shared")  # alone: the project becomes the session's
             else:
@@ -1484,13 +1543,14 @@ class Bridge:
         self.log("De andra delar nya versioner hela tiden, försöker igen om en stund")
         return False
 
-    async def _not_ours(self, mine, newest):
+    async def _not_ours(self, mine, newest, quiet=False):
         """A save of a project that isn't the session's (FL didn't open it from
         a version, and it was never shared): others work on the session's
         project, so it isn't shared, and they hear of it. Saving it again
         within CONFIRM_TIME shares it as everyone's project, as "Dela mitt
         projekt" (share_mine) does. If someone else made another project the
-        session's (a switch), this is the old one: FL opens the new one."""
+        session's (a switch), this is the old one: FL opens the new one.
+        `quiet`: FL saved by itself, which never makes it everyone's."""
         now = time.monotonic()
         if newest is not None and newest.get("switch") and newest["flp"] not in self.shared:
             self.unshareable = mine["sha"]
@@ -1500,6 +1560,10 @@ class Bridge:
             self.log("'%s' delas inte: %s bytte sessionens projekt till '%s'%s" % (
                 mine["name"], newest["by"], newest["name"], ", som öppnas nu" if how == "now" else ""))
             self._tell_saved("old", v=newest["v"], others=[newest["by"]], open=how)
+            return True
+        if quiet:
+            self.unshareable, self.unrelated = mine["sha"], True
+            self._tell_saved("unrelated")
             return True
         if self.unrelated_at is not None and now - self.unrelated_at <= CONFIRM_TIME:
             self.unrelated_at = None
@@ -1552,12 +1616,41 @@ class Bridge:
         self._tell_saved(outcome, v=answer[1], others=others, why=why)
         return True
 
-    async def _merge_and_share(self, mine, newest):
+    async def _nothing_new(self, mine, auto):
+        """Whether a save FL made by itself has nothing the others lack: FL saw
+        no content (it saved to get someone's version in), or the save differs
+        from its base only in values live sync has shared already."""
+        if not auto["content"]:
+            return True
+        base = self._cached(self.base)
+        if base is None:
+            return False
+        canon = {"base": dict(self.known.get(self.base, {}).get("tokens") or {}), "mine": mine["tokens"]}
+        try:
+            changed = await asyncio.to_thread(flp_merge.content_changes, base, mine["data"], canon)
+        except flp_merge.MergeRefused:
+            return False
+        return not changed
+
+    async def _settle(self, mine, newest):
+        """A save FL made by itself with nothing new (docs/phase5.md): it isn't
+        shared. If someone shared a version FL hasn't got, the save is merged
+        with it and FL opens the result (`pulled`): nothing of FL's is lost."""
+        if newest is None or newest["flp"] == self.base:
+            self._tell_saved("unchanged")
+            return True
+        if self.base is None or (newest.get("switch") and newest["flp"] not in self.shared):
+            return await self._not_ours(mine, newest, quiet=True)
+        return await self._merge_and_share(mine, newest, quiet=True)
+
+    async def _merge_and_share(self, mine, newest, quiet=False):
         """Someone shared `newest` since FL's project left the base: merge FL's
         save with it (flp_merge.py). Then share the result and open it in FL;
         or share the save as it is if it has everything; or just open the
         newest if the save has nothing new; or, when they can't be merged,
-        share the save anyway (newest wins) and say so."""
+        share the save anyway (newest wins) and say so. `quiet`: the save has
+        nothing new (_settle), so nothing is shared: FL opens the merge, or
+        the newest as it is if they can't be merged."""
         what = "version %d av '%s'" % (newest["v"], newest["name"])
         try:
             theirs = await self._version_bytes(newest)
@@ -1578,15 +1671,21 @@ class Bridge:
                 result = await asyncio.to_thread(flp_merge.merge, base, mine["data"], theirs, canon, mapping)
             except flp_merge.MergeRefused as e:
                 refused = e
+        if refused is not None and quiet:
+            # Nothing of FL's is lost by opening theirs as it is: its save had nothing new.
+            return await self._pull(newest, folder, flp.rewrite_paths(theirs, mapping, data_path=""), mine)
         if refused is not None:
             reason = getattr(refused, "text", None) or str(refused)
             copy = self._keep_copy(folder, newest, flp.rewrite_paths(theirs, mapping, data_path=""))
             self.log("Din version kunde inte slås ihop med %s (%s), så den ersätter den.%s"
                      % (what, reason, " Den finns kvar som %s" % copy if copy else ""))
             return await self._share_mine(mine, newest, "replaced", why=reason, others=[newest["by"]])
+        if not result.theirs_new and quiet:
+            self._tell_saved("unchanged")  # FL has all of theirs already
+            return True
         if not result.theirs_new:
             return await self._share_mine(mine, newest, "shared")  # it has all of theirs already
-        if not result.mine_new:
+        if not result.mine_new or quiet:
             return await self._pull(newest, folder, result.data, mine)
         return await self._share_merged(mine, newest, folder, result)
 
@@ -1761,6 +1860,64 @@ class Bridge:
         self.log("Öppnar %s i FL" % want["path"])
         return "now"
 
+    # --- content without Ctrl+S (docs/phase5.md) ----------------------------------------
+
+    def _may_save(self, pull=False):
+        """Whether FL may save by itself: it is in a session with other FLs,
+        and its project is the session's (or the session switched to another
+        one, which a save brings in: `pull`) and a file of its own on disk that
+        FL's title names. Never a new, unsaved project: that would ask where."""
+        if not self.auto_sync or self.autosave_broken or not self.in_session() or not self._other_fls():
+            return False
+        if self.base is None and not (pull and self.newest and self.newest.get("switch")):
+            return False
+        path = self.watched
+        if not path or not os.path.isfile(path) or not os.access(path, os.W_OK):
+            return False
+        factory = self.fl_dirs.get("factory_dir")
+        if factory and inside_folder(path, factory):
+            return False  # one of FL's own (a template): Ctrl+S would ask where to save it
+        try:
+            title = self.fl_title()
+        except Exception:
+            title = None
+        return title_shows(title, os.path.splitext(os.path.basename(path))[0])
+
+    def _offer_autosave(self, now):
+        """Tell FL whether it may save by itself, when that changes; and notice
+        an FL that said it would save but didn't (a dialog came instead)."""
+        asked = self.autosave
+        if asked is not None and not asked["seen"] and now - asked["at"] > AUTOSAVE_CHECK:
+            self.autosave, self.autosave_broken = None, True
+            self.log("FL sparade inte när det skulle spara av sig självt, så FLSync ber inte om det mer. "
+                     "Det som inte synkas live delas när du sparar (Ctrl+S)")
+            self.to_fl({"t": "autosave", "ok": False, "broken": True})
+            self.autosave_sent = False
+            return
+        ok = self._may_save()
+        if ok != bool(self.autosave_sent):  # (FL's script starts with no)
+            self.autosave_sent = ok
+            self.to_fl({"t": "autosave", "ok": ok})
+
+    def _check_pull(self):
+        """Someone shared a version FL hasn't got, and FL can't just open it:
+        it has unsaved changes (others' values written make them too). FL is
+        asked to save once it is stopped and idle (`pull`); that save is merged
+        with the version and FL opens the result (_settle)."""
+        newest = self.newest
+        if newest is None or self.sharing or newest["flp"] in (self.base, self.pull_sent):
+            return
+        if self.to_launch is not None and not self.fl_dirty:
+            return  # FL opens it by itself once playback stops
+        if newest["flp"] not in self.downloaded and newest["flp"] not in self.shared:
+            return  # not here yet
+        if not self._may_save(pull=True) or newer(newest.get("flv"), self.fl_version):
+            return  # (a newer FL's project comes in through Ctrl+S, merged in this FL's version)
+        if self._missing_plugins(newest["plugins"]):
+            return  # FL would stop at a dialog about them: that one the user opens
+        self.pull_sent = newest["flp"]
+        self.to_fl({"t": "pull", "by": newest["by"], "v": newest["v"]})
+
     def _on_status(self, msg):
         """FL's `st`: whether it has unsaved changes and plays."""
         dirty, playing = msg.get("dirty"), msg.get("playing")
@@ -1779,6 +1936,7 @@ class Bridge:
         if self.launched is not None and (self.fl_loaded_at or 0) >= self.launched[1]:
             self.launched = None  # FL opened that file before: this load is of another project
         self.fl_loaded_at = now
+        self.pull_sent = None  # whatever FL has now: what it lacks is asked for again
         self._reported("opened", fingerprint(msg.get("fp")))
         self._identify_soon()
 

@@ -787,6 +787,55 @@ class SmallTest(Checks):
                 self.assertIsNone(e.__cause__, e.text)
 
 
+class ContentChangesTest(unittest.TestCase):
+    """content_changes(): what a save changed that live sync doesn't carry."""
+
+    def changes(self, edit, start=None):
+        base = Flp(start or small())
+        mine = resave(base)
+        edit(mine)
+        return [key[0] for key in flp_merge.content_changes(base.data(), mine.data())]
+
+    def test_a_save_without_changes_has_no_content(self):
+        self.assertEqual(self.changes(lambda f: None), [])  # FL's work time and clip ids aren't content
+
+    def test_live_values_are_no_content(self):
+        def live(f):
+            f.set_text(f.index(203), "Kick 2")                     # a channel's name
+            f.events[f.index(156)][1] = (128000).to_bytes(4, "little")  # the tempo
+            f.set_text(f.index(204), "Trummor 2")                  # a mixer track's name
+            f.set_text(f.index(193), "Vers")                       # a pattern's name
+            f.set_text(f.index(239), "Melodi")                     # a playlist track's name
+            params = f.records(f.index(225), 12)
+            put(params[2], 8, 999, 4)                              # a mixer level
+            f.set_records(f.index(225), params)
+        self.assertEqual(self.changes(live), [])
+
+    def test_clips_notes_samples_and_plugins_are_content(self):
+        def clip(f):
+            clips = f.clips()
+            f.set_records(f.playlist(), sorted_in(clips, new_clip(f, clips[0], 768)))
+        self.assertEqual(self.changes(clip), ["playlist"])
+
+        def notes(f):
+            f.set_records(f.notes(1), f.note_records(1) + [bytearray(note(384, 67))])
+        self.assertEqual(self.changes(notes), ["notes"])
+
+        def sample(f):
+            f.set_text(f.index(196), r"C:\Ljud\Ny kick.wav")
+        self.assertEqual(self.changes(sample), ["channel"])
+
+        def plugin_state(f):
+            f.events[f.index(213)][1] = b"\x09\x09\x09\x09"  # the mixer's Fruity Limiter, set otherwise
+        self.assertEqual(self.changes(plugin_state), ["insert"])
+
+    def test_a_new_channel_is_content(self):
+        bigger = small(channels=CHANNELS + [("Perc", SNARE)])
+        base, mine = small(), Flp(bigger)
+        changed = flp_merge.content_changes(base, resave(mine).data())
+        self.assertIn(("channel", 3), changed)
+
+
 # --- FL's own projects -----------------------------------------------------------------
 
 def bundled(rel, only=None):
@@ -1103,6 +1152,11 @@ class BundledTest(Checks):
         self.assertIn(LOCAL, [s.path for s in p.samples])
         self.assertNotIn(KIMS, [s.path for s in p.samples])
         self.assertEqual(r.taken, ["kanal 2 (Kick (Kim))"])
+
+    def test_a_resave_of_a_real_project_has_no_content(self):
+        for rel, data in self.each(self.IDENTITY):
+            with self.subTest(rel):
+                self.assertEqual(flp_merge.content_changes(data, resave(Flp(data)).data()), [])
 
     def test_a_project_from_before_fl_20(self):
         b = read(HOUSEWORK)

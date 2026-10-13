@@ -157,6 +157,15 @@ LATEST = 26
 
 WHO = {"base": "grundversionen", "mine": "din version", "theirs": "den andra versionen"}
 PER_ID = frozenset(("head", "links", "arrtail", "notes", "mixer"))
+# What live sync carries anyway (docs/protocol_v2.md, Keys), per kind of chunk:
+# a save that changed nothing else needn't become a version (content_changes).
+LIVE_EVENTS = {
+    "head": frozenset((11, 17, 18, 66, 93, 156)),        # main swing, time signature, tempo (old and fine)
+    "channel": frozenset((0, 22, 128, 203, 219, 229)),    # on/off, mixer track, color, name, levels
+    "insert": frozenset((95, 149, 204, 235, 236)),       # icon, color, name, routing, the track's settings
+    "pattern": frozenset((150, 193)),                    # color, name
+}
+LIVE_KINDS = frozenset(("mixer", "track"))               # mixer levels, playlist tracks: all of it is live
 HEAD_PARTS = {194: "titeln", 156: "tempot", 195: "kommentarerna", 206: "genren", 207: "artisterna",
               197: "webbadressen", 231: "kanalgrupperna", 216: "kontrollkopplingarna"}
 
@@ -197,6 +206,31 @@ def merge(base, mine, theirs, canon=None, localize=None):
         raise
     except Exception as e:  # noqa: BLE001 - a bug must not stop a save: newest wins instead
         raise MergeRefused("invalid", "sammanslagningen misslyckades (%s)" % e.__class__.__name__) from e
+
+
+def content_changes(base, mine, canon=None):
+    """What `mine` changed since `base` that live sync doesn't carry (clips,
+    notes, samples, plugins and their state, channels, patterns...): the keys
+    of those chunks, empty if every change is a live value that the others
+    have already. `canon` as for merge(). MergeRefused if either can't be read."""
+    canon = canon or {}
+    b, m = _Project("base", base, canon.get("base")), _Project("mine", mine, canon.get("mine"))
+    size = _clip_size((b, m, m))
+    b.clip_size = m.clip_size = size
+    changed = []
+    for key in _unique([c.key for c in b.chunks] + [c.key for c in m.chunks]):
+        before, after = b.get(key), m.get(key)
+        if before is None or after is None:
+            changed.append(key)  # added or removed: a channel, a pattern, a mixer track...
+        elif key[0] not in LIVE_KINDS and _content(before) != _content(after):
+            changed.append(key)
+    return changed
+
+
+def _content(chunk):
+    """A chunk's canonical events without those live sync carries."""
+    live = LIVE_EVENTS.get(chunk.key[0], frozenset())
+    return tuple(event for event in chunk.canon() if event[0] not in live)
 
 
 # --- one version ---------------------------------------------------------------------

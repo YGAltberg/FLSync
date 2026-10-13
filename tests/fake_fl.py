@@ -62,6 +62,9 @@ class FakeProject:
         self.invalid = []         # calls that addressed something that doesn't exist
         self.hints = []           # ui.setHintMsg texts
         self.changed_flag = 0     # general.getChangedFlag(): 0 saved, 1 changed since, 2 changed but autosaved
+        self.undo = 0             # general.getUndoHistoryCount(): tests add steps for edits FL makes undoable
+        self.save_requests = 0    # transport.globalTransport(FPT_Save, ...) calls
+        self.on_save = None       # what FL does then, if a test says
 
     def module(self, name):
         if name not in self.modules:
@@ -87,6 +90,8 @@ def _install_base(fl, project):
     general.getVersion = lambda: 40
     general.safeToEdit = lambda: fl.safe
     general.getChangedFlag = lambda: project.changed_flag  # tests set it: FL doesn't here by itself
+    general.getUndoHistoryCount = lambda: project.undo
+    general.getUndoHistoryPos = lambda: 0
 
     device = project.module("device")
     device.isAssigned = lambda: fl.assigned

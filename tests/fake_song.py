@@ -32,7 +32,8 @@ MIDI = {
     "REC_Tempo": 0x4000 * 0x10000 + 5, "REC_UpdateValue": 1, "REC_GetValue": 2,
     "REC_UpdateControl": 16, "REC_Control": 973, "REC_InvalidID": 2147483647,
     "PM_Stopped": 0, "PM_Playing": 1, "PM_Precount": 2,
-    "HW_Dirty_LEDs": 256, "HW_Dirty_Tracks": 2048,
+    "HW_Dirty_LEDs": 256, "HW_Dirty_Tracks": 2048, "HW_Dirty_Undo": 131072,
+    "FPT_Save": 92, "PME_System": 2, "GT_Global": 8,
 }
 
 
@@ -53,6 +54,7 @@ class FakeSong:
         self.playing = False       # what isPlaying() reports...
         self.playing_real = False  # ...lags behind until FL refreshes
         self.recording = False
+        self.length = SONG_BARS    # in bars: clips placed later in the song make it longer
         self.pos = 0               # absolute ticks
         self.started_at = 0        # where playback started: stop() goes back there
         self.calls = []            # transport commands, e.g. ("setSongPos", 768, 2)
@@ -156,7 +158,16 @@ def install(project):
     t.getLoopMode = lambda: song.loop
     t.setLoopMode = command("setLoopMode", lambda: setattr(song, "loop", 1 - song.loop))
     t.getSongPos = lambda mode=-1: song.to_unit(song.pos, mode)
-    t.getSongLength = lambda mode: song.to_unit(SONG_BARS * song.bar(), mode)
+    t.getSongLength = lambda mode: song.to_unit(song.length * song.bar(), mode)
+
+    def global_transport(command, value, pmeflags=2, flags=15):
+        song.calls.append(("globalTransport", command, value, flags))
+        if command == MIDI["FPT_Save"] and value:
+            project.save_requests += 1  # what FL then does (saves, asks where) is the test's
+            if project.on_save:
+                project.on_save()
+        return 1
+    t.globalTransport = global_transport
 
     def set_song_pos(position, mode=-1):
         song.calls.append(("setSongPos", position, mode))

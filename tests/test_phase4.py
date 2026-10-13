@@ -154,7 +154,9 @@ def first_note_key(data, pattern):
 # --- the tests ---------------------------------------------------------------------------------
 
 @unittest.skipUnless(os.path.isfile(SONG), "FL Studio 2025:s demolåt finns inte här")
-class MergeOnSaveTest(snaps.Session):
+class MergeSession(snaps.Session):
+    """Anna and Bo in a session where Anna's project is version 1 (start)."""
+
     def setUp(self):
         super().setUp()
         self.song = touch(snaps.read(SONG), 0)  # every save of FL's is a new file
@@ -194,6 +196,8 @@ class MergeOnSaveTest(snaps.Session):
                 return json.load(f)
         return link.call(read)
 
+
+class MergeOnSaveTest(MergeSession):
     def test_two_saves_are_merged_and_opened(self):
         self.start()
         snaps.save(self.project, touch(rename_channel(self.song, 2, "Annas kanal"), 2))
@@ -420,6 +424,66 @@ class MergeOnSaveTest(snaps.Session):
         again = bridge_mod.Bridge("127.0.0.1", self.port, lambda message: None, logger=lambda text: None,
                                   **{k: v for k, v in self.bo.places.items() if k != "opener"})
         self.assertEqual((again.base, again.base_project), (self.relay.snapshot["flp"], self.written))
+
+
+class AutoSyncTest(MergeSession):
+    """docs/phase5.md: FL saves by itself for what live sync can't carry, a save
+    with nothing new isn't shared, and others' versions come in through a save."""
+
+    def show(self, link, path):
+        link.title = "%s - FL Studio 2026" % os.path.basename(path)  # FL's title names its project's file
+
+    def said(self, link, msg):
+        return msg in link.sent
+
+    def test_fl_may_save_by_itself_once_its_title_names_the_sessions_file(self):
+        self.start()
+        self.settle(0.3)
+        self.assertFalse(self.said(self.bo, {"t": "autosave", "ok": True}))  # no title: maybe a new project
+        self.show(self.bo, self.written)
+        self.wait_for(lambda: self.said(self.bo, {"t": "autosave", "ok": True}))
+
+    def test_a_save_fl_makes_by_itself_is_shared_like_ctrl_s(self):
+        self.start()
+        self.anna_fl.send({"t": "autosave", "content": 2, "pull": False})
+        snaps.save(self.project, touch(change_note(self.song, 1, first_note_key(self.song, 1) + 1), 2))
+        self.wait_for(lambda: self.relay.version == 2)
+
+    def test_a_save_with_only_live_values_new_isnt_shared(self):
+        self.start()
+        self.anna_fl.send({"t": "autosave", "content": 1, "pull": False})  # FL thought it was content
+        snaps.save(self.project, touch(self.song, 2))                     # but the save has nothing new
+        self.wait_for(lambda: {"t": "saved", "outcome": "unchanged"} in self.anna.sent)
+        self.settle(0.3)
+        self.assertEqual(self.relay.version, 1)
+
+    def test_someone_elses_version_comes_in_through_a_save(self):
+        self.start()
+        self.bo_fl.send({"t": "st", "dirty": 1})  # Anna's values written into Bo's FL: it has unsaved changes
+        self.show(self.bo, self.written)
+        snaps.save(self.project, touch(rename_channel(self.song, 2, "Annas kanal"), 2))
+        self.wait_for(lambda: self.relay.version == 2)
+        self.wait_for(lambda: self.said(self.bo, {"t": "pull", "by": "Anna", "v": 2}), why="\n".join(self.bo.logs))
+        self.assertEqual(self.bo.opened, [])  # FL has unsaved changes: opening would ask about them
+        # Bo's FL saves once it is stopped and idle, with nothing new of its own.
+        self.bo_fl.send({"t": "autosave", "content": 0, "pull": True})
+        snaps.save(self.written, touch(self.bo_content, 3))
+        self.bo_fl.send({"t": "st", "dirty": 0})
+        answer = self.saved(self.bo)
+        self.assertEqual((answer["outcome"], answer["open"]), ("pulled", "now"), answer)
+        self.wait_for(lambda: self.bo.opened == [self.written])
+        self.assertEqual(channel_names(snaps.read(self.written))[2], "Annas kanal")
+        self.settle(0.3)
+        self.assertEqual(self.relay.version, 2)  # nothing went back: no ping-pong of versions
+
+    def test_an_fl_that_didnt_save_when_it_said_so_isnt_asked_again(self):
+        self.start()
+        self.show(self.bo, self.written)
+        self.wait_for(lambda: self.said(self.bo, {"t": "autosave", "ok": True}))
+        with mock.patch.object(bridge_mod, "AUTOSAVE_CHECK", 0.3):
+            self.bo_fl.send({"t": "autosave", "content": 1, "pull": False})  # then a dialog came instead
+            self.wait_for(lambda: self.said(self.bo, {"t": "autosave", "ok": False, "broken": True}))
+        self.assertTrue(any("FL sparade inte" in line for line in self.bo.logs))
 
 
 class KeepaliveTest(snaps.Session):

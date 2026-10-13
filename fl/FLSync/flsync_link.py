@@ -42,6 +42,10 @@ class MidiLink:
     def alive(self, now):
         return self.last_heard is not None and now - self.last_heard < LINK_TIMEOUT
 
+    def receiving(self):
+        """A message from the bridge is coming in (a big welcome takes seconds)."""
+        return self.buffer is not None
+
     def forgive(self, now):
         """FL itself was busy and heard nothing meanwhile: the silence was ours,
         not the bridge's, so the bridge gets LINK_TIMEOUT from now to be heard."""

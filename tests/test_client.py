@@ -25,6 +25,9 @@ class FakeLink:
     def forgive(self, now):
         pass
 
+    def receiving(self):
+        return False
+
     def can_send(self):
         return True
 
