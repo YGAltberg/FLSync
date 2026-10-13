@@ -56,6 +56,8 @@ FL_GONE = 120.0             # ...and counts as gone after this long, or as soon 
 FL_CHECK_INTERVAL = 1.0     # how often a silent FL's window is looked for
 CONFIRM_TIME = 15.0         # saving a project that isn't the session's again within this makes it everyone's
 AUTOSAVE_CHECK = 15.0       # FL asked to save by itself (`autosave`) and no save seen within this: it can't
+SEARCH_DEPTH = 3            # how deep FL's projects folder is searched for the file FL's title names...
+SEARCH_KEPT = 30.0          # ...and how long what was found counts
 CONNECT_TIMEOUT = 5.0
 MIDI_RETRY = 2.0            # seconds between attempts to (re)open the MIDI ports
 MAX_LINE = 64 << 20         # the welcome holds the session's whole state and its stored notes
@@ -604,6 +606,28 @@ def file_key(path):
     return os.path.normcase(os.path.abspath(path))
 
 
+def flp_files_named(root, name, depth):
+    """The files called `name` (casefolded) in `root` and its folders down to
+    `depth` levels, leaving out FL's Backup folders (autosaves of FL's own)."""
+    found, folders = [], [(root, 0)]
+    while folders:
+        folder, level = folders.pop()
+        try:
+            entries = list(os.scandir(folder))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    if level < depth and entry.name.casefold() != "backup":
+                        folders.append((entry.path, level + 1))
+                elif entry.name.casefold() == name:
+                    found.append(os.path.abspath(entry.path))
+            except OSError:
+                continue
+    return found
+
+
 def inside_folder(path, folder):
     """Whether `path` is somewhere inside `folder` (any case, links followed)."""
     try:
@@ -844,6 +868,7 @@ class Bridge:
         self.writer = None
         self.fl_name = None
         self.hello_name = None    # the name in FL's last hello, before --name
+        self.app_version = None   # the launcher's FLSync version, told to the others in the hello
         self.fl_last_heard = None
         self.fl_open = fl_window_open if fl_open is None else fl_open  # whether FL's window is open (fl_window_open)
         self.fl_busy = False      # FL is silent but its window is open: it stays in the session for now
@@ -944,6 +969,7 @@ class Bridge:
         self.autosave = None     # {at, content, pull, seen}: FL said it saves by itself now
         self.autosave_broken = False  # FL didn't save when it said it would: never asked again
         self.pull_sent = None    # the version FL was asked to get in (`pull`)
+        self.search = None       # (name, when, path or None): the last search for the file FL's title names
         self._load_state()
 
     # --- from FL -----------------------------------------------------------
@@ -980,7 +1006,7 @@ class Bridge:
             # FL saves by itself right after this: that save is told apart (_share_now).
             content = msg.get("content")
             self.autosave = {"at": now, "content": content if is_int(content) else 1, "pull": msg.get("pull") is True,
-                             "seen": False}
+                             "check": msg.get("check") is True, "seen": False}
         elif kind == "pr":
             self._on_pr(msg)  # for the piano roll scripts; the relay never hears it
         elif kind == "st":
@@ -1088,6 +1114,8 @@ class Bridge:
         self.hello_name = hello.get("name")
         if self.name:
             hello = dict(hello, name=self.name)
+        if self.app_version:
+            hello = dict(hello, ver=self.app_version)  # so the others can tell when FLSyncs differ
         if self.password:
             hello = dict(hello, pw=self.password)
         self.close_session()
@@ -1371,7 +1399,27 @@ class Bridge:
         for path in candidates:
             if named(path) and os.path.isfile(path):
                 return os.path.abspath(path)
-        return None
+        return self._find_by_name(name, candidates)
+
+    def _find_by_name(self, name, recent):
+        """A project FL opened from somewhere none of the above saw (its browser,
+        File > Open): the only file of that name in FL's projects folder or a
+        folder of a recent file. Two of that name: None, as no file at all."""
+        key, now = name.casefold(), time.monotonic()
+        if self.search is not None and self.search[0] == key and now - self.search[1] < SEARCH_KEPT:
+            return self.search[2]
+        roots = []
+        user = self.fl_dirs.get("user_dir")
+        if user:
+            roots.append((os.path.join(user, "FL Studio", "Projects"), SEARCH_DEPTH))
+        roots += [(os.path.dirname(path), 0) for path in recent if isinstance(path, str) and path]
+        found = {}
+        for root, depth in roots:
+            for path in flp_files_named(root, key + ".flp", depth):
+                found[file_key(path)] = path
+        result = next(iter(found.values())) if len(found) == 1 else None
+        self.search = (key, now, result)
+        return result
 
     def _saved_by_fl(self):
         """The .flp files written lately that FL wrote, likeliest first: not by
@@ -1619,8 +1667,9 @@ class Bridge:
     async def _nothing_new(self, mine, auto):
         """Whether a save FL made by itself has nothing the others lack: FL saw
         no content (it saved to get someone's version in), or the save differs
-        from its base only in values live sync has shared already."""
-        if not auto["content"]:
+        from its base only in values live sync has shared already (`check`:
+        FL wasn't sure, it had unsaved changes it couldn't tell apart)."""
+        if not auto["content"] and not auto["check"]:
             return True
         base = self._cached(self.base)
         if base is None:
@@ -1882,6 +1931,16 @@ class Bridge:
         except Exception:
             title = None
         return title_shows(title, os.path.splitext(os.path.basename(path))[0])
+
+    def set_auto_sync(self, on):
+        """FL saving by itself and getting others' versions in: on or off (the
+        launcher's window). FL hears it at once."""
+        self.auto_sync = on
+        if not on:
+            if self.pull_sent is not None:
+                self.to_fl({"t": "pull", "cancel": True})
+            self.pull_sent = None
+        self._offer_autosave(time.monotonic())
 
     def _offer_autosave(self, now):
         """Tell FL whether it may save by itself, when that changes; and notice

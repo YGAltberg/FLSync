@@ -1,5 +1,13 @@
 # Ändringar
 
+## 0.12.0 – smidigare
+
+- **Ctrl+S direkt efter att du öppnat ett projekt delas.** FLSync hittar projektfilen via namnet i FL:s titelrad, i FL:s projektmapp, om det bara finns en fil med det namnet. Förut syntes en sparning först när FL hade något osparat, och automatisk sparning kom inte igång förrän dess.
+- **Skyddsnät för innehåll:** har FL osparade ändringar som FLSync inte kunde se vad de var, sparar FL ändå när uppspelningen står still en stund (högst var 20:e sekund). Det delas bara om något nytt faktiskt finns.
+- **FLSync-fönstret säger när en ny version finns** (det frågar GitHub en gång när det startar) och öppnar sidan att ladda ner den från.
+- **Deltagarna visar vilken FLSync de har**, och fönstret varnar om någon har en annan version än du.
+- **Spara och hämta automatiskt** går att stänga av i fönstret, och där står vad som händer just nu (t.ex. att någons ändringar hämtas in när du stoppar).
+
 ## 0.11.0 – innehåll utan Ctrl+S
 
 - **FL sparar av sig själv** (FL 2026.1.7 eller senare): har du lagt till kanaler, plugins, samples, klipp eller noter, alltså sådant som inte kan synkas live, sparar FL några sekunder efter att du slutat ändra, och det delas som när du trycker Ctrl+S. En sparning med bara sådant som redan synkas live delas inte.

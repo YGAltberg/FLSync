@@ -457,6 +457,16 @@ class AutoSyncTest(MergeSession):
         self.settle(0.3)
         self.assertEqual(self.relay.version, 1)
 
+    def test_a_save_fl_wasnt_sure_about_is_shared_only_with_content(self):
+        self.start()
+        self.anna_fl.send({"t": "autosave", "content": 0, "pull": False, "check": True})
+        snaps.save(self.project, touch(self.song, 2))  # unsaved changes were only live values
+        self.wait_for(lambda: {"t": "saved", "outcome": "unchanged"} in self.anna.sent)
+        self.assertEqual(self.relay.version, 1)
+        self.anna_fl.send({"t": "autosave", "content": 0, "pull": False, "check": True})
+        snaps.save(self.project, touch(change_note(self.song, 1, first_note_key(self.song, 1) + 1), 3))
+        self.wait_for(lambda: self.relay.version == 2)  # a note FL couldn't tell us about
+
     def test_someone_elses_version_comes_in_through_a_save(self):
         self.start()
         self.bo_fl.send({"t": "st", "dirty": 1})  # Anna's values written into Bo's FL: it has unsaved changes
@@ -605,6 +615,24 @@ class WhereFlSavesTest(snaps.Session):
         path = os.path.join(self.tmp, "Någonstans", "Beat.flp")
         self.fl_saves(fl, path)
         self.wait_for(lambda: link.bridge.watched == os.path.abspath(path))
+
+    def test_a_project_opened_from_fls_projects_folder_is_found_by_its_name(self):
+        # Opened in FL's browser: no write, no recent file yet (FL writes those when it closes).
+        fl, link = self.fl_with_title(None)
+        projects = os.path.join(link.bridge.fl_dirs["user_dir"], "FL Studio", "Projects")
+        path = snaps.save(os.path.join(projects, "Låtar", "Beat", "Beat.flp"), snaps.make_project())
+        snaps.save(os.path.join(projects, "Backup", "Beat.flp"), snaps.make_project())  # FL's autosaves don't count
+        link.title = "Beat.flp - FL Studio 2026"
+        self.wait_for(lambda: link.bridge.watched == os.path.abspath(path))
+
+    def test_two_projects_of_that_name_are_neither(self):
+        fl, link = self.fl_with_title(None)
+        projects = os.path.join(link.bridge.fl_dirs["user_dir"], "FL Studio", "Projects")
+        for folder in ("Gammal", "Ny"):
+            snaps.save(os.path.join(projects, folder, "Beat.flp"), snaps.make_project())
+        link.title = "Beat.flp - FL Studio 2026"
+        self.settle(0.3)
+        self.assertIsNone(link.bridge.watched)  # FL's next save shows which one
 
     def test_another_programs_flp_of_that_name_doesnt_count(self):
         fl, link = self.fl_with_title("Beat.flp - FL Studio 2025")

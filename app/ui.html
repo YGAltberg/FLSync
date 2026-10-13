@@ -108,6 +108,10 @@ body:not(.installing) #setup, body.installing .me { display: none !important; }
     <h3 id="gone-title">FLSync är inte igång</h3>
     <p id="gone-text">Starta FLSync igen: dubbelklicka på FLSync.</p>
   </div>
+  <div id="update" class="banner wait" hidden>
+    <p id="update-text"></p>
+    <div class="row"><button class="primary" id="update-get">Ladda ner</button></div>
+  </div>
 
   <section id="setup" hidden>
     <h2 id="setup-title">Installera FLSync</h2>
@@ -219,12 +223,17 @@ body:not(.installing) #setup, body.installing .me { display: none !important; }
       <p id="sync" class="small warn"></p>
       <div class="row"><button id="share-mine" hidden>Dela mitt projekt</button></div>
     </div>
+    <div id="autosync-box" hidden>
+      <label class="small"><input type="checkbox" id="autosync"> Spara och hämta automatiskt</label>
+      <p id="autosync-text" class="muted small"></p>
+    </div>
   </section>
 
   <section id="version-box" hidden>
     <h2>Senaste versionen av projektet</h2>
-    <p class="small"><strong>Spara i FL (Ctrl+S) för att synka projektet:</strong> dina ändringar går till de andra och
-      du får deras. Har ni ändrat samtidigt slås versionerna ihop. Rattar, steg och plugin-inställningar synkas direkt.</p>
+    <p class="small"><strong>Det som inte synkas live delas som versioner</strong> när FL sparar (av sig själv, eller när
+      du trycker Ctrl+S): dina ändringar går till de andra och du får deras. Har ni ändrat samtidigt slås versionerna ihop.
+      Rattar, steg och plugin-inställningar synkas direkt.</p>
     <p id="saved" class="small" hidden></p>
     <p id="version-title"></p>
     <p id="version-details" class="muted small"></p>
@@ -475,6 +484,7 @@ function render(s) {
     li.append(el("strong", null, p.name));
     if (p.me) li.append(el("span", "tag accent", "du"));
     li.append(el("span", "muted", p.app === "fl" ? (p.flv ? "FL " + p.flv : "FL") : p.app));
+    if (p.ver) li.append(el("span", "muted small", "FLSync " + p.ver));
     if (p.pen) li.append(el("span", "tag accent", "ändrar strukturen"));
     return li;
   });
@@ -485,6 +495,13 @@ function render(s) {
   show("sync-box", !!s.sync);
   $("sync").textContent = s.sync ? s.sync.text : "";
   show("share-mine", !!(s.sync && s.sync.share));
+  show("autosync-box", !!s.autosync);
+  if (s.autosync) {
+    if (document.activeElement !== $("autosync")) $("autosync").checked = s.autosync.on;
+    $("autosync-text").textContent = s.autosync.text;
+  }
+  show("update", !!s.update);
+  $("update-text").textContent = s.update ? s.update.text : "";
 
   // The newest version.
   const v = s.version;
@@ -559,6 +576,8 @@ $("host").addEventListener("click", (e) => {
   act("host", { port: Number.isFinite(port) ? port : null }, e.target);
 });
 $("join").addEventListener("click", (e) => act("join", { code: $("code").value }, e.target));
+$("autosync").addEventListener("change", (e) => act("autosync", { on: e.target.checked }));
+$("update-get").addEventListener("click", (e) => act("update", {}, e.target));
 $("code").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("join").click(); }
 });

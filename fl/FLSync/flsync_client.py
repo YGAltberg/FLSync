@@ -85,6 +85,9 @@ AUTOSAVE_INTERVAL = 5.0         # ...and at most this often
 PULL_IDLE = 2.0                 # someone else's version is loaded once nothing changed here for this long,
 PULL_COUNTDOWN = 3.0            # ...and FL said so this long before
 FULL_REFRESH = 8                # an OnRefresh with this many flags is FL refreshing everything, not an edit
+DIRTY_QUIET = 4.0               # FL with unsaved changes also saves once stopped and nothing changed for this
+DIRTY_INTERVAL = 20.0           # long, at most this often: content we didn't see goes out too (the bridge
+                                # shares such a save only if it has something live sync didn't carry)
 # The part of the structure fingerprint (flsync_structure.py) each key prefix
 # depends on: "c" the channels, "m" the mixer. Others (song, transport,
 # playlist tracks, patterns) mean the same in every structure.
@@ -282,6 +285,8 @@ class SyncClient:
         self.pull = None         # {by, v}: the bridge wants someone's newer version in FL
         self.pull_at = None      # when the countdown to that ends
         self.from_idle = True    # this tick came from OnIdle (FL may be asked to save only then)
+        self.next_check = 0.0    # FL with unsaved changes saves to be compared (DIRTY_INTERVAL)
+        self.saved_by_itself = float("-inf")  # when FL last saved by itself
 
     # --- driven by FL's callbacks -----------------------------------------
 
@@ -993,15 +998,25 @@ class SyncClient:
             return
         if self.content and quiet >= AUTOSAVE_QUIET and not flsync_content.recording():
             self._save_now(now, pull=False)
+        elif (self.status and self.status[0] and quiet >= DIRTY_QUIET and now >= self.next_check
+              and not is_playing() and not flsync_content.recording()):
+            # An edit nothing above showed (FL doesn't make every edit an undo
+            # step): the bridge compares the save with the session's version.
+            self.next_check = now + DIRTY_INTERVAL
+            self._save_now(now, pull=False, check=True)
 
-    def _save_now(self, now, pull):
+    def _save_now(self, now, pull, check=False):
         if not _safe_to_edit() or flsync_content.in_menu():
             return  # FL is in a menu or a dialog: next time
         self.next_autosave = now + AUTOSAVE_INTERVAL
+        self.saved_by_itself = now
         self.pull = self.pull_at = None
         # The bridge must hear it before FL saves (which holds FL up), to tell
         # this save from a Ctrl+S: it shares one with nothing new quietly.
-        self.link.send({"t": "autosave", "content": self.content, "pull": pull})
+        msg = {"t": "autosave", "content": self.content, "pull": pull}
+        if check:
+            msg["check"] = True
+        self.link.send(msg)
         self.link.flush()
         self.content, self.undo_steps = 0, []  # in this save (if FL doesn't, the bridge says so: `broken`)
         if not flsync_content.save():
@@ -1240,7 +1255,8 @@ class SyncClient:
             log("du hade inget nytt att dela, så du får %s version" % theirs)
             hint = "FLSync: hämtar %s version%s" % (theirs, then)
         elif outcome == "unchanged":
-            log("du hade inget nytt att dela")
+            if now - self.saved_by_itself > HOLD_TIMEOUT or self.debug:
+                log("du hade inget nytt att dela")  # (FL saving by itself says nothing about it)
             if opening:
                 hint = "FLSync: inget nytt att dela%s" % then
         elif outcome == "unrelated":

@@ -19,7 +19,7 @@ Det här gör alla som är med, en gång:
    - ställer in FL:s MIDI-inställningar åt dig;
    - lägger genvägen **FLSync** på skrivbordet och i Start-menyn, och **Reparera FLSync** och **Avinstallera FLSync** i Start-menyn.
 
-   Du behöver inte installera Python: FLSync använder den som följer med FL. Ingen terminal öppnas: allt sker i FLSync-fönstret. Mappen du packade upp kan du ta bort efteråt. **Ny version av FLSync:** gör samma sak med den nya zip-filen. Det uppdaterar det du har (du behöver inte avinstallera först).
+   Du behöver inte installera Python: FLSync använder den som följer med FL. Ingen terminal öppnas: allt sker i FLSync-fönstret. Mappen du packade upp kan du ta bort efteråt. **Ny version av FLSync:** FLSync-fönstret säger till när det finns en (*Ladda ner*). Gör samma sak med den nya zip-filen; det uppdaterar det du har (du behöver inte avinstallera först). Kör alla i sessionen samma version: fönstret varnar annars.
 
 Sedan, varje gång ni spelar:
 
@@ -46,7 +46,7 @@ Stänger du FLSync-fönstret avslutas FLSync. Gör du det (eller stänger datorn
 | **Spellistan** | spårens namn, färg och mute |
 | **Närvaro** | FL:s hint-rad visar vem som ändrar vad, t.ex. `Anna: Insert 3 volym`, och när någon ansluter eller lämnar |
 
-**Av sig själv, några sekunder efter att du slutat ändra (eller när du sparar):** hela projektet, alltså nya och borttagna kanaler och plugins med sina inställningar, samples, noter, klipp i spellistan och automation. FL sparar själv när något sådant har ändrats och du inte har rört något på två sekunder (FL 2026.1.7 eller senare; i äldre FL trycker du Ctrl+S). FLSync skickar projektfilen och de samples som behövs, även samples inuti plugins som FPC och DirectWave. Hos de andra laddas det in när de har stoppat uppspelningen, efter en nedräkning i hint-raden. En sparning med bara sådant som redan synkas live delas inte. FL:s script-API kan inte ändra sådant live, så det går inte fortare än så. Se [Spara och slå ihop](#spara-och-slå-ihop).
+**Av sig själv, några sekunder efter att du slutat ändra (eller när du sparar):** hela projektet, alltså nya och borttagna kanaler och plugins med sina inställningar, samples, noter, klipp i spellistan och automation. FL sparar själv när något sådant har ändrats och du inte har rört något på två sekunder (FL 2026.1.7 eller senare; i äldre FL trycker du Ctrl+S). FLSync skickar projektfilen och de samples som behövs, även samples inuti plugins som FPC och DirectWave. Hos de andra laddas det in när de har stoppat uppspelningen, efter en nedräkning i hint-raden. En sparning med bara sådant som redan synkas live delas inte. FL sparar då i din projektfil, som när du trycker Ctrl+S (tidigare versioner ligger i mappen `Versioner`). Vill du hellre bestämma själv: bocka ur *Spara och hämta automatiskt* i FLSync-fönstret. FL:s script-API kan inte ändra sådant live, så det går inte fortare än så. Se [Spara och slå ihop](#spara-och-slå-ihop).
 
 **Noter på begäran:** i pianorullen kan du skicka ett mönsters noter till de andra, och hämta deras, utan att någon behöver spara eller öppna något. Se [Noter](#noter).
 

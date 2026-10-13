@@ -78,6 +78,11 @@ LOG_FILE_MAX = 1 << 20    # ... started over (the old one kept as .old) when it 
 LOBBY = "ingen session vald: välj Starta session eller Gå med i FLSync-fönstret"
 LOBBY_REPEAT = 30.0       # FL hears that again at most this often (e.g. after a Reload script)
 RESUME_RETRY = 10.0       # a guest resuming its session tries the host again this often
+REPO = "https://github.com/YGAltberg/FLSync"
+RELEASES_API = "https://api.github.com/repos/YGAltberg/FLSync/releases/latest"  # asked once per start
+RELEASES_PAGE = REPO + "/releases/latest"
+UPDATE_TIMEOUT = 8.0
+AUTOSAVE_FROM = (26, 1, 7)  # the FL that may save by itself (flsync_content.SAVES_SINCE)
 PAGE = os.path.join(APP_DIR, "ui.html")
 ICON = os.path.join(APP_DIR, "flsync.ico")  # also the shortcut's icon
 
@@ -354,6 +359,14 @@ def ask_running(data_dir, name, body=None, timeout=1.5):
         return None
 
 
+def fetch_json(url, timeout):
+    """A JSON document from the internet (GitHub's API wants a User-Agent)."""
+    request = urllib.request.Request(url, headers={"User-Agent": "FLSync/" + VERSION,
+                                                   "Accept": "application/vnd.github+json"})
+    with urllib.request.urlopen(request, timeout=timeout) as answer:
+        return json.loads(answer.read(1 << 20).decode("utf-8"))
+
+
 def find_running(data_dir, timeout=1.5):
     """The page address of a launcher already running for this data folder, or None."""
     answer = ask_running(data_dir, "ping", timeout=timeout)
@@ -380,7 +393,8 @@ class App:
 
     def __init__(self, data_dir=None, system=None, name=None, relay_port=None, bind="0.0.0.0", ui_port=0,
                  midi_port=MIDI_PORT, bridge_options=None, run_midi=None, mapper=None, ip_lookup=True,
-                 verbose=False, max_blob=None, echo=True, probe_timeout=PROBE_TIMEOUT, setup=None, window=False):
+                 verbose=False, max_blob=None, echo=True, probe_timeout=PROBE_TIMEOUT, setup=None, window=False,
+                 update_check=False):
         self.data_dir = data_dir or bridge_mod.local_data_dir()
         self.setup = setup
         self.window_wanted = window
@@ -406,6 +420,8 @@ class App:
         self.run_midi = run_midi or bridge_mod.run_midi
         self.mapper = upnp.PortMapper() if mapper is None else mapper  # False: don't ask the router
         self.ip_lookup = ip_lookup
+        self.update_check = update_check  # ask GitHub once whether there is a newer FLSync
+        self.update = None           # {version, url} of a newer FLSync, once found
         self.verbose = verbose
         self.max_blob = max_blob or relay_mod.DEFAULT_MAX_BLOB
         self.probe_timeout = probe_timeout
@@ -495,9 +511,14 @@ class App:
             return
         self.bridge = bridge_mod.Bridge("127.0.0.1", self.relay_port, send_to_fl=None, logger=self._bridge_log,
                                         name=self.name, **self.bridge_options)
+        self.bridge.app_version = VERSION
+        if self.settings.get("auto_sync") is False:
+            self.bridge.auto_sync = False  # turned off in the window
         self._hook(self.bridge)
         self._spawn(self._run_midi())
         self._spawn(self._look_around())
+        if self.update_check:
+            self._spawn(self._check_update())
 
     async def run(self, open_browser=True, action=None):
         await self.start()
@@ -1241,6 +1262,10 @@ class App:
             result = self._setup_action(body)
         elif name == "window":
             result = await self._window_action()
+        elif name == "autosync":
+            result = self.set_auto_sync(body.get("on") is True)
+        elif name == "update":
+            result = self._open_update()
         else:
             return webui.text_response(404, "finns inte")
         return webui.json_response(result, 200 if result.get("ok") else 400)
@@ -1276,6 +1301,42 @@ class App:
         else:
             ok = False
         return {"ok": bool(ok)}
+
+    def set_auto_sync(self, on):
+        """The window's "Spara och hämta automatiskt" (docs/phase5.md)."""
+        if self.bridge is None:
+            return {"ok": False}
+        self.bridge.set_auto_sync(on)
+        self.settings.set(auto_sync=on)
+        self.log("Automatisk sparning och hämtning är %s" % ("på" if on else "av"))
+        return {"ok": True}
+
+    def _open_update(self):
+        """The newer FLSync's page, in the browser: its zip is there."""
+        if self.update is None:
+            return {"ok": False}
+        try:
+            self.system.open_browser(self.update["url"])
+        except Exception as e:
+            self.log("Kunde inte öppna %s: %s" % (self.update["url"], e))
+            return {"ok": False}
+        return {"ok": True}
+
+    async def _check_update(self):
+        """Whether GitHub has a newer FLSync than this one (asked once; nothing
+        is downloaded). Quietly nothing if it can't be told."""
+        try:
+            info = await asyncio.to_thread(fetch_json, RELEASES_API, UPDATE_TIMEOUT)
+        except (OSError, ValueError):
+            return
+        tag = info.get("tag_name") if isinstance(info, dict) else None
+        newest = version_tuple(tag[1:] if isinstance(tag, str) and tag[:1] == "v" else tag)
+        if newest and newest > (version_tuple(VERSION) or ()):
+            url = info.get("html_url")
+            if not (isinstance(url, str) and url.startswith(REPO + "/")):
+                url = RELEASES_PAGE
+            self.update = {"version": ".".join(str(n) for n in newest), "url": url}
+            self.log("FLSync %s finns (du har %s): ladda ner den i FLSync-fönstret" % (self.update["version"], VERSION))
 
     async def _window_action(self):
         """FLSync started again while it runs: show the window (a new one if it
@@ -1412,6 +1473,7 @@ class App:
             return []
         pen = self._pen_holder()
         return [{"name": str(p.get("name")), "app": p.get("app") or "fl", "flv": p.get("flv"),
+                 "ver": VERSION if p.get("id") == my_id else p.get("ver"),
                  "me": p.get("id") == my_id, "pen": pen is not None and p.get("id") == pen.get("id")}
                 for p in people]
 
@@ -1440,7 +1502,14 @@ class App:
     def _people_note(self, people):
         """A note when the FL versions differ (builds of one release don't count):
         it works, each one's saves are merged in their own FL's version, but
-        what only the newer FL has may be missing in the older."""
+        what only the newer FL has may be missing in the older. First, though,
+        another FLSync than ours: that one is worth updating at once."""
+        others = [p for p in people if not p["me"] and p["app"] == "fl" and p.get("ver") != VERSION]
+        if others:
+            p = others[0]
+            theirs = "FLSync %s" % p["ver"] if p.get("ver") else "en äldre FLSync"
+            return ("%s har %s och du %s. Uppdatera båda till den senaste versionen (%s), annars kan delar av synken "
+                    "inte fungera." % (p["name"], theirs, VERSION, RELEASES_PAGE))
         mine = version_tuple(self.fl_hello.get("flv")) if self.bridge.in_session() else None
         if not mine:
             return None
@@ -1482,6 +1551,41 @@ class App:
                             "nedan)." % genitive(newest.get("by")), "share": False}
         return {"text": "Synken är pausad: ditt projekt har andra kanaler eller plugins än sessionens. Öppna samma "
                         "projekt som de andra, eller spara ditt (Ctrl+S) för att dela det.", "share": False}
+
+    def _autosync_status(self):
+        """What FL saving by itself and getting others' versions in does now
+        (docs/phase5.md), for the window's checkbox."""
+        bridge = self.bridge
+        if not self.mode or bridge is None:
+            return None
+        flv = version_tuple(self.fl_hello.get("flv"))
+        newest = bridge.newest if bridge.in_session() else None
+        if not bridge.auto_sync:
+            text = ("Av: det som inte synkas live delas när du sparar (Ctrl+S), och andras versioner får du med Ctrl+S "
+                    "eller Öppna senaste versionen.")
+        elif bridge.autosave_broken:
+            text = "FL sparade inte när FLSync bad om det, så det görs inte nu. Spara med Ctrl+S för att dela."
+        elif flv and flv[:3] < AUTOSAVE_FROM:
+            text = ("Din FL (%s) kan inte spara av sig själv: spara med Ctrl+S för att dela. FL 2026.1.7 eller senare "
+                    "gör det automatiskt." % self.fl_hello.get("flv"))
+        elif newest and bridge.pull_sent == newest["flp"] and newest["flp"] != bridge.base:
+            text = "%s ändringar hämtas in när du har stoppat uppspelningen och inte rör något." % capital(
+                genitive(newest.get("by")))
+        elif bridge.autosave_sent:
+            text = ("På: FL sparar själv det som inte synkas live (klipp, noter, nya plugins, samples) när du slutat "
+                    "ändra, och de andras ändringar laddas in när du har stoppat uppspelningen.")
+        elif bridge.in_session() and not bridge._other_fls():
+            text = "På när någon mer är med i sessionen."
+        else:
+            text = ("På när ditt projekt är sessionens och sparat som en fil (spara en gång med Ctrl+S, eller öppna "
+                    "sessionens version).")
+        return {"on": bridge.auto_sync, "text": text}
+
+    def _update_status(self):
+        if self.update is None:
+            return None
+        return {"text": "FLSync %s finns (du har %s). Ladda ner den och kör nya FLSync.exe, så uppdateras det du har. "
+                        "Be de andra i sessionen göra samma sak." % (self.update["version"], VERSION)}
 
     def _version_status(self):
         bridge = self.bridge
@@ -1589,6 +1693,8 @@ class App:
             "people_note": self._people_note(people),
             "pen": self._pen_status(),
             "sync": self._sync_status(),
+            "autosync": self._autosync_status(),
+            "update": self._update_status(),
             "version": self._version_status(),
             "saved": self.saved if self.mode else None,
             "resuming": {"text": "Försöker gå med i sessionen igen, som när FLSync avslutades. Värden svarar inte "
@@ -1730,7 +1836,8 @@ def run_program(args, data_dir, system):
     options["flp_writes"] = watcher.recent
     app = App(data_dir=data_dir, system=system, name=args.name, relay_port=args.relay_port, bind=args.bind,
               ui_port=args.ui_port, midi_port=args.midi_port, bridge_options=options,
-              mapper=False if args.no_upnp else None, ip_lookup=not args.no_ip_lookup, verbose=args.verbose,
+              mapper=False if args.no_upnp else None, ip_lookup=not args.no_ip_lookup,
+              update_check=not args.no_ip_lookup, verbose=args.verbose,
               setup=setup, window=not args.browser and not args.no_browser)
     action = None
     if args.host:

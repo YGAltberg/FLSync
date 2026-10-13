@@ -9,6 +9,7 @@ import asyncio
 import os
 import time
 import unittest
+from unittest import mock
 
 from harness import free_port
 from test_launcher import FL26, LauncherTest, flsync, hello, winsys
@@ -220,3 +221,60 @@ class SavedTextTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class AutoSyncWindowTest(LauncherTest):
+    """docs/phase5.md in the window: who runs which FLSync, FL saving and
+    getting versions in by itself, and a newer FLSync."""
+
+    def test_everyone_shows_their_flsync_and_another_one_is_warned_about(self):
+        anna = self.launcher("Anna")
+        code = self.host(anna, flv=FL26)
+        bo = self.launcher("Bo")
+        self.join(bo, code)
+        self.wait_for(lambda: len(anna.status()["people"]) == 2)
+        self.assertEqual({p["name"]: p["ver"] for p in anna.status()["people"]},
+                         {"Anna": flsync.VERSION, "Bo": flsync.VERSION})
+        self.assertIsNone(anna.status()["people_note"])
+        self.raw(anna.app.relay_port, "Cy", anna.app.relay.password, ver="0.10.0")  # an FL with an older FLSync
+        self.wait_for(lambda: "Cy har FLSync 0.10.0" in (anna.status()["people_note"] or ""))
+        self.wait_for(lambda: "Cy har FLSync 0.10.0" in (bo.status()["people_note"] or ""))
+
+    def test_saving_and_getting_in_by_itself_can_be_turned_off(self):
+        anna = self.launcher("Anna")
+        self.host(anna, flv=FL26)
+        self.assertEqual(anna.status()["autosync"]["on"], True)
+        self.assertIn("någon mer", anna.status()["autosync"]["text"])  # alone: nobody to share with yet
+        self.assertEqual(anna.post("autosync", on=False), (200, {"ok": True}))
+        autosync = anna.status()["autosync"]
+        self.assertEqual((autosync["on"], autosync["text"][:3]), (False, "Av:"))
+        anna.stop()
+        self.launchers.remove(anna)
+        again = self.launcher("Anna")  # the same folder: the choice stays
+        self.assertFalse(again.app.bridge.auto_sync)
+
+    def test_an_older_fl_is_told_to_press_ctrl_s(self):
+        anna = self.launcher("Anna")
+        self.host(anna, flv="26.1.6.5500")
+        self.assertIn("kan inte spara av sig själv", anna.status()["autosync"]["text"])
+
+    def test_a_newer_flsync_is_offered(self):
+        newer = {"tag_name": "v99.0.0", "html_url": flsync.REPO + "/releases/tag/v99.0.0"}
+        with mock.patch.object(flsync, "fetch_json", lambda url, timeout: newer):
+            anna = self.launcher("Anna", update_check=True)
+            self.wait_for(lambda: anna.status()["update"] is not None)
+        self.assertIn("FLSync 99.0.0 finns", anna.status()["update"]["text"])
+        self.assertEqual(anna.post("update"), (200, {"ok": True}))
+        self.assertEqual(anna.system.browsed, [flsync.REPO + "/releases/tag/v99.0.0"])
+
+    def test_the_same_flsync_or_a_page_elsewhere_isnt_offered(self):
+        same = {"tag_name": "v" + flsync.VERSION}
+        with mock.patch.object(flsync, "fetch_json", lambda url, timeout: same):
+            anna = self.launcher("Anna", update_check=True)
+            self.settle(0.5)
+        self.assertIsNone(anna.status()["update"])
+        elsewhere = {"tag_name": "v99.0.0", "html_url": "https://example.com/FLSync.exe"}
+        with mock.patch.object(flsync, "fetch_json", lambda url, timeout: elsewhere):
+            bo = self.launcher("Bo", update_check=True)
+            self.wait_for(lambda: bo.status()["update"] is not None)
+        bo.post("update")
+        self.assertEqual(bo.system.browsed, [flsync.RELEASES_PAGE])  # only ever FLSync's own page

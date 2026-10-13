@@ -672,6 +672,19 @@ class AutoSaveTest(Phase4Test):
         self.tick(100, 0.1)
         self.assertEqual(self.saves(), [])  # once: until something else changes
 
+    def test_unsaved_changes_nothing_showed_are_saved_to_be_compared(self):
+        self.song.playing = self.song.playing_real = True
+        self.fl.project.changed_flag = 1  # an edit FL made no undo step of, nothing live
+        self.tick(60, 0.1)
+        self.assertEqual(self.saves(), [])  # never while it plays
+        self.song.playing = self.song.playing_real = False
+        self.tick(50, 0.1)
+        self.assertEqual(self.saves(), [{"t": "autosave", "content": 0, "pull": False, "check": True}])
+        self.tick(100, 0.1)
+        self.assertEqual(self.saves(), [])  # FL still says unsaved: at most every 20 s
+        self.tick(100, 0.1)
+        self.assertEqual(len(self.saves()), 1)
+
     def test_fl_refreshing_everything_is_no_edit(self):
         self.client.on_refresh(443735)  # what FL 26.1.7 sends a moment after the script starts or a load
         self.tick(40, 0.1)

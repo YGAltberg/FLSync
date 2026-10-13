@@ -183,13 +183,14 @@ def megabytes(size):
 
 
 class Client:
-    def __init__(self, cid, name, app, writer, fp=None, flv=None):
+    def __init__(self, cid, name, app, writer, fp=None, flv=None, ver=None):
         self.id = cid
         self.name = name
         self.app = app
         self.writer = writer
         self.fp = fp          # its project's structure fingerprint (FLs say it)
         self.flv = flv        # its FL's version text (FLs say it)
+        self.ver = ver        # its FLSync's version (the launcher's bridge says it)
         self.upload = None    # files connections: the blob being uploaded
         self.failed = None    # ...and (h, n) of one whose remaining chunks are ignored after an error
         self.heard = time.monotonic()  # when it last sent anything
@@ -199,6 +200,8 @@ class Client:
         info = {"id": self.id, "name": self.name, "app": self.app}
         if self.flv:
             info["flv"] = self.flv
+        if self.ver:
+            info["ver"] = self.ver
         return info
 
 
@@ -423,7 +426,8 @@ class Relay:
         name = self._unique_name(hello_name(hello, cid))
         fp = hello.get("fp") if valid_fp(hello.get("fp")) else None
         flv = hello.get("flv") if isinstance(hello.get("flv"), str) and 0 < len(hello.get("flv")) <= 40 else None
-        client = Client(cid, name, app, writer, fp, flv)
+        ver = hello.get("ver") if isinstance(hello.get("ver"), str) and 0 < len(hello.get("ver")) <= 20 else None
+        client = Client(cid, name, app, writer, fp, flv, ver)
         if app == "fl" and self._differs(fp) and not self._other_fls(client):
             # Alone with another structure (it opened another project while
             # nobody else was here): that structure becomes the session's.
