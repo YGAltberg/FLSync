@@ -46,6 +46,8 @@ Stänger du FLSync-fönstret avslutas FLSync. Gör du det (eller stänger datorn
 | **Spellistan** | spårens namn, färg och mute |
 | **Närvaro** | FL:s hint-rad visar vem som ändrar vad, t.ex. `Anna: Insert 3 volym`, och när någon ansluter eller lämnar |
 
+**Nya instrument, inom några sekunder:** lägger någon in ett instrument (en VST som Serum, eller FL:s egna som FLEX och Sytrus) sist i kanalracket, så dyker det upp hos de andra med samma inställningar, utan att projektet laddas om, även mitt i en uppspelning. Sedan synkas dess rattar live. (FL 2026.1.7 eller senare. Pluginet måste vara installerat hos de andra.)
+
 **Av sig själv, några sekunder efter att du slutat ändra (eller när du sparar):** hela projektet, alltså nya och borttagna kanaler och plugins med sina inställningar, samples, noter, klipp i spellistan och automation. FL sparar själv när något sådant har ändrats och du inte har rört något på två sekunder (FL 2026.1.7 eller senare; i äldre FL trycker du Ctrl+S). FLSync skickar projektfilen och de samples som behövs, även samples inuti plugins som FPC och DirectWave. Hos de andra laddas det in när de har stoppat uppspelningen, efter en nedräkning i hint-raden. En sparning med bara sådant som redan synkas live delas inte. FL sparar då i din projektfil, som när du trycker Ctrl+S (tidigare versioner ligger i mappen `Versioner`). Vill du hellre bestämma själv: bocka ur *Spara och hämta automatiskt* i FLSync-fönstret. FL:s script-API kan inte ändra sådant live, så det går inte fortare än så. Se [Spara och slå ihop](#spara-och-slå-ihop).
 
 **Noter på begäran:** i pianorullen kan du skicka ett mönsters noter till de andra, och hämta deras, utan att någon behöver spara eller öppna något. Se [Noter](#noter).

@@ -58,6 +58,9 @@ CONFIRM_TIME = 15.0         # saving a project that isn't the session's again wi
 AUTOSAVE_CHECK = 15.0       # FL asked to save by itself (`autosave`) and no save seen within this: it can't
 SEARCH_DEPTH = 3            # how deep FL's projects folder is searched for the file FL's title names...
 SEARCH_KEPT = 30.0          # ...and how long what was found counts
+LIVE_FOLDER = "Kanaler"      # in a version's folder: the channels brought into FL live, as plugin presets
+LIVE_ADD_GAP = 0.5          # between asking FL to open two of them
+LIVE_CONFIRM = 15.0         # ...and how long FL may take to have them all (a big VST loads for seconds)
 CONNECT_TIMEOUT = 5.0
 MIDI_RETRY = 2.0            # seconds between attempts to (re)open the MIDI ports
 MAX_LINE = 64 << 20         # the welcome holds the session's whole state and its stored notes
@@ -299,10 +302,16 @@ def open_file(path):
     """Open a project in FL: with the FL Studio that runs, which hands it to
     its open window. Windows opens .flp files with the newest FL installed,
     which may be another version than the one in use: that would start a
-    second FL. Without a running FL, the way Windows opens .flp files."""
-    exe = running_fl() if path.lower().endswith(".flp") else None
+    second FL. Without a running FL, the way Windows opens .flp files. A
+    plugin preset (.fst) only ever goes to the FL that runs (it adds a channel)."""
+    kind = os.path.splitext(path)[1].lower()
+    exe = running_fl() if kind in (".flp", ".fst") else None
     if exe:
         subprocess.Popen([exe, path], close_fds=True)
+    elif kind == ".fst":
+        # A preset is for the FL in the session (it adds a channel there);
+        # Windows may open .fst files with another FL version.
+        raise OSError("FL Studio körs inte (eller flera FL-versioner gör det)")
     else:
         os.startfile(path)
 
@@ -626,6 +635,16 @@ def flp_files_named(root, name, depth):
             except OSError:
                 continue
     return found
+
+
+def parts_differ(a, b, area):
+    """Whether structures `a` and `b` differ where keys of `area` point ("c"
+    the channels, "m" the mixer: flsync_client.parts_differ)."""
+    if a is None or b is None or a == b:
+        return False
+    if len(a) != 12 or len(b) != 12:
+        return True
+    return a[:6] != b[:6] if area == "c" else a[6:] != b[6:]
 
 
 def inside_folder(path, folder):
@@ -2301,6 +2320,8 @@ class Bridge:
         self.to_fl(notice)
         if too_new or not path:
             return
+        if not self.auto_open and await self._add_live(snapshot, before, missing):
+            return  # FL has what the version brought, without loading anything (better than opening it)
         if self.auto_open:
             try:
                 self.opener(path)
@@ -2311,6 +2332,62 @@ class Bridge:
             self._launch(path, snapshot, project.title, "received")
         elif snapshot.get("switch") and self.base is None:
             self._launch(path, snapshot, project.title, "switched")  # when playback stops, if nothing is unsaved
+
+    async def _add_live(self, snapshot, before, missing):
+        """Channels someone added after all the others (a new instrument, a VST
+        with its sound) come into FL at once, as plugin presets FL opens: it
+        adds each one at the end of its channel rack, also while it plays,
+        without loading the project again (docs/phase5.md). Only when that is
+        all the version brought and FL's channels are the session's from
+        before it: then FL has the version, and its base moves on. Anything
+        else comes in by loading the version (_check_pull)."""
+        if not self.auto_sync or self.base is None or missing or not self.fl_fp or not before:
+            return False
+        if parts_differ(self.fl_fp, before, "c"):
+            return False  # FL's channels aren't the ones the version added to
+        base, theirs = self._cached(self.base), self._cached(snapshot["flp"])
+        if base is None or theirs is None:
+            return False
+        canon = {"base": dict(self.known.get(self.base, {}).get("tokens") or {}),
+                 "mine": {s["path"]: s["h"] for s in snapshot["samples"] if not s.get("plugin")}}
+        try:
+            added = await asyncio.to_thread(flp_merge.appended_channels, base, theirs)
+            changed = await asyncio.to_thread(flp_merge.content_changes, base, theirs, canon)
+            presets = [flp_merge.channel_preset(theirs, n) for n in added]
+        except flp_merge.MergeRefused:
+            return False
+        rest = [key for key in changed if not (key[0] == "channel" and key[1] in added)]
+        if not added or rest or None in presets:
+            return False  # (a sampler's sample or anything else comes with the version)
+        try:
+            folder = os.path.join(inside(self.projects_dir, safe_name(snapshot["name"], "FLSync-projekt")), LIVE_FOLDER)
+        except TransferError:
+            return False
+        names = []
+        self.to_fl({"t": "adding", "fp": snapshot["fp"]})  # FL's next structure is theirs: nothing of its own
+        for n, (data, name) in zip(added, presets):
+            path = os.path.join(folder, safe_name(name, "Kanal %d" % (n + 1)) + ".fst")  # FL names it after the file
+            try:
+                os.makedirs(folder, exist_ok=True)
+                with open(path, "wb") as f:
+                    f.write(data)
+                self.opener(path)
+            except (OSError, AttributeError, TransferError) as e:
+                self.log("Kunde inte lägga in kanal %d live: %s" % (n + 1, e))
+                return bool(names)
+            names.append(name or "kanal %d" % (n + 1))
+            await asyncio.sleep(LIVE_ADD_GAP)
+        # FL says its new structure (`fp`) once it has them: then it has the version.
+        deadline = time.monotonic() + LIVE_CONFIRM
+        while parts_differ(self.fl_fp, snapshot["fp"], "c") and time.monotonic() < deadline:
+            await asyncio.sleep(0.2)
+        if parts_differ(self.fl_fp, snapshot["fp"], "c"):
+            self.log("FL lade inte till %s som väntat, så versionen öppnas i stället när det går" % names_text(names))
+            return False
+        self.log("%s lade till %s: finns nu i FL, med samma inställningar" % (snapshot["by"], names_text(names)))
+        self.to_fl({"t": "added", "by": snapshot["by"][:40], "what": [n[:40] for n in names[:5]]})
+        self._set_base(snapshot["flp"], self.base_project)
+        return True
 
     async def version_file(self, snapshot):
         """The file FL opens for `snapshot` (the launcher's "Öppna senaste

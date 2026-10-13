@@ -141,6 +141,21 @@ def set_version(data, version):
     return edited(data, change)
 
 
+def add_channel_like(data, source):
+    """A copy of channel `source` (its plugin and state) after the last channel,
+    as when someone adds that instrument at the end of the channel rack."""
+    head, events = decode(data)
+    count = sum(1 for e, _ in events if e == 64)
+    at = anchor(events, 64, source)
+    end = next(i for i in range(at + 1, len(events)) if events[i][0] in (64, 65, 99))
+    copy = [[e, v] for e, v in events[at:end]]
+    copy[0][1] = count.to_bytes(len(copy[0][1]), "little")
+    first_arrangement = next(i for i, (e, _) in enumerate(events) if e == 99)
+    events[first_arrangement:first_arrangement] = copy
+    head = head[:10] + (count + 1).to_bytes(2, "little") + head[12:]
+    return encode(head, events)
+
+
 def channel_names(data):
     return [c.name for c in flp.parse(data).channels]
 
@@ -456,6 +471,44 @@ class AutoSyncTest(MergeSession):
         self.wait_for(lambda: {"t": "saved", "outcome": "unchanged"} in self.anna.sent)
         self.settle(0.3)
         self.assertEqual(self.relay.version, 1)
+
+    def test_an_instrument_someone_added_comes_in_live(self):
+        self.start()
+        self.anna_fl.report(snaps.FP_B)  # Anna adds an instrument at the end of the channel rack...
+        song = add_channel_like(self.song, 28)  # (FLEX, Piano Dark)
+        snaps.save(self.project, touch(song, 2))  # ...and her FL saves
+        self.wait_for(lambda: self.relay.version == 2)
+        # Bo's FL gets it as a plugin preset, without loading anything.
+        self.wait_for(lambda: any(path.endswith(".fst") for path in self.bo.opened), why="\n".join(self.bo.logs))
+        preset = [path for path in self.bo.opened if path.endswith(".fst")]
+        self.assertEqual(os.path.basename(preset[0]), "Piano Dark.fst")
+        self.assertIn({"t": "adding", "fp": snaps.FP_B}, self.bo.sent)
+        data, name = bridge_mod.flp_merge.channel_preset(song, 45)
+        self.assertEqual(snaps.read(preset[0]), data)
+        self.bo_fl.report(snaps.FP_B)  # FL added it: its structure is the session's again
+        self.wait_for(lambda: self.bo.bridge.base == self.relay.snapshot["flp"])
+        self.assertIn({"t": "added", "by": "Anna", "what": ["Piano Dark"]}, self.bo.sent)
+        self.assertNotIn(self.written, self.bo.opened)  # the project wasn't opened again
+        self.settle(0.3)
+        self.assertFalse(any(m.get("t") == "pull" for m in self.bo.sent))
+
+    def test_an_instrument_fl_didnt_add_comes_with_the_version(self):
+        self.start()
+        self.anna_fl.report(snaps.FP_B)
+        with mock.patch.object(bridge_mod, "LIVE_CONFIRM", 0.5):
+            snaps.save(self.project, touch(add_channel_like(self.song, 28), 2))
+            self.wait_for(lambda: any(path.endswith(".fst") for path in self.bo.opened))
+            self.wait_for(lambda: any("FL lade inte till" in line for line in self.bo.logs))
+        self.assertNotEqual(self.bo.bridge.base, self.relay.snapshot["flp"])  # FL gets the version as usual
+
+    def test_more_than_new_channels_comes_with_the_version(self):
+        self.start()
+        self.anna_fl.report(snaps.FP_B)
+        song = add_channel_like(change_note(self.song, 1, first_note_key(self.song, 1) + 1), 28)
+        snaps.save(self.project, touch(song, 2))
+        self.wait_for(lambda: self.relay.version == 2)
+        self.settle(0.5)
+        self.assertFalse(any(path.endswith(".fst") for path in self.bo.opened))  # a note too: not live
 
     def test_a_save_fl_wasnt_sure_about_is_shared_only_with_content(self):
         self.start()

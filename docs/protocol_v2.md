@@ -366,6 +366,25 @@ itself (flsync_content.py):
   saves once it is stopped, not recording and nothing changed for 2 s, after
   a 3 s countdown in the hint bar ("hämtar Kims ändringar om 3 s"); any
   change here starts it over. That save brings the version in as above.
+* **New instruments live (0.13).** FL, asked to open a plugin preset (an
+  .fst: FLhd format 0x30, events 199 version, 201 plugin, 212 window, 203
+  name, 213 state) with the FL that runs, adds a channel with that plugin
+  and its whole state at the end of its channel rack, named after the file,
+  without loading the project and also while it plays (measured in FL
+  26.1.7 with FLEX and the VST3 Serum 2: every parameter the same). Effects
+  and mixer presets opened that way always go to the master track, so they
+  aren't used. When a version arrives whose only change from FL's base is
+  channels added after all others (`flp_merge.appended_channels`, and
+  `content_changes` has nothing else; FL numbers a channel's cut groups,
+  event 132, by itself, so those don't count), and FL's channels are the
+  session's from before, the bridge writes each new channel as a preset
+  (`flp_merge.channel_preset`) to `<version folder>\Kanaler\<name>.fst`,
+  sends FL `adding {fp}` and opens them. FL's script takes that structure as
+  someone else's (`fp` with `load`, no pen, no content for 20 s or until 2 s
+  after `added`). Once FL's channels are the version's, the bridge sends
+  `added {by, what}` and the version is FL's base; else it comes in by
+  loading (after `LIVE_CONFIRM` 15 s). The sharer's FL saves a new channel
+  or plugin 1 s after it came, whatever else goes on, so it gets there fast.
 * The bridge paces MIDI to FL by the clock (4000 events/s, bursts of 120).
   A hello while the welcome is still being sent doesn't restart the
   session; FL doesn't say hello again while a message is coming in.

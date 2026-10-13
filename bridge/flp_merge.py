@@ -166,6 +166,10 @@ LIVE_EVENTS = {
     "pattern": frozenset((150, 193)),                    # color, name
 }
 LIVE_KINDS = frozenset(("mixer", "track"))               # mixer levels, playlist tracks: all of it is live
+# ...and what FL numbers by itself, so the same channel differs between two
+# FLs: a channel's cut groups (132), which FL gave a channel it added from a
+# preset otherwise than the sharer's FL had (measured in FL 26.1.7).
+ASSIGNED_EVENTS = {"channel": frozenset((132,))}
 HEAD_PARTS = {194: "titeln", 156: "tempot", 195: "kommentarerna", 206: "genren", 207: "artisterna",
               197: "webbadressen", 231: "kanalgrupperna", 216: "kontrollkopplingarna"}
 
@@ -227,10 +231,55 @@ def content_changes(base, mine, canon=None):
     return changed
 
 
+PRESET_EVENTS = (PLUGIN, 212, NAME, STATE)  # what FL's plugin presets (.fst) hold: plugin, window, name, state
+PRESET_FORMAT = 0x30   # FLhd's format word of a plugin preset (FL's own .fst files)
+
+
+def channel_preset(project, n):
+    """Channel n of `project` as a plugin preset: (.fst bytes, the channel's
+    name). FL, asked to open it, adds a channel with that plugin and its whole
+    state at the end of the channel rack, named as the file, without loading
+    the project again (measured in FL 26.1.7, a VST3 too). None if the project
+    has no such channel or it holds no plugin."""
+    p = _Project("theirs", project, None)
+    chunk = p.get(("channel", n))
+    if chunk is None:
+        return None
+    picked, seen = [], set()
+    for i in range(chunk.lo, chunk.hi):
+        eid = p.events[i][0]
+        if eid in PRESET_EVENTS and eid not in seen:
+            seen.add(eid)
+            picked.append(p.data[p.events[i][1]:p.events[i][3]])
+    if PLUGIN not in seen or STATE not in seen:
+        return None  # a sampler or audio channel: no plugin to bring
+    body = p.data[p.events[0][1]:p.events[0][3]] + b"".join(picked)  # FL's version first, as FL writes them
+    data = (b"FLhd" + (6).to_bytes(4, "little") + PRESET_FORMAT.to_bytes(2, "little") + (1).to_bytes(2, "little")
+            + p.ppq.to_bytes(2, "little") + b"FLdt" + len(body).to_bytes(4, "little") + body)
+    return data, _channel_name(chunk) or chunk.first_text(PLUGIN)
+
+
+def appended_channels(base, theirs, canon=None):
+    """The channels `theirs` added after all of `base`'s, when that is the
+    only change of its channels' structure (none removed, moved or given
+    another plugin): their numbers, or [] (also when they can't be told)."""
+    canon = canon or {}
+    try:
+        b, t = _Project("base", base, canon.get("base")), _Project("theirs", theirs, canon.get("theirs"))
+    except MergeRefused:
+        return []
+    old, new = b.kind("channel"), t.kind("channel")
+    if len(new) <= len(old) or any(_generator(new[n]) != _generator(c) for n, c in enumerate(old)):
+        return []
+    if _moved(_channel_labels(old), _channel_labels(new)):
+        return []
+    return list(range(len(old), len(new)))
+
+
 def _content(chunk):
     """A chunk's canonical events without those live sync carries."""
-    live = LIVE_EVENTS.get(chunk.key[0], frozenset())
-    return tuple(event for event in chunk.canon() if event[0] not in live)
+    skip = LIVE_EVENTS.get(chunk.key[0], frozenset()) | ASSIGNED_EVENTS.get(chunk.key[0], frozenset())
+    return tuple(event for event in chunk.canon() if event[0] not in skip)
 
 
 # --- one version ---------------------------------------------------------------------

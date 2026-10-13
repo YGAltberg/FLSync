@@ -1,5 +1,11 @@
 # Ändringar
 
+## 0.13.0 – nya instrument live
+
+- **Lägger någon in ett instrument (en VST eller FL:s egna, t.ex. Serum, FLEX, Sytrus) dyker det upp hos de andra inom några sekunder**, med exakt samma inställningar, utan att projektet laddas om och även mitt i en uppspelning. FL sparar själv en sekund efter att instrumentet kom, och FLSync ger det till de andras FL som ett plugin-preset som FL lägger in sist i kanalracket. Sedan synkas dess rattar live. Testat i FL 2026.1.7 med FLEX och Serum 2: alla parametrar blev lika.
+- Det gäller instrument som läggs in sist i kanalracket. Ett instrument mitt i kanalracket, effekter i mixern, samples och klipp kommer som förut: de laddas in när de andra har stoppat uppspelningen.
+- `.fst`-filer öppnas bara i det FL som kör (Windows kunde ha dem kopplade till en annan FL-version).
+
 ## 0.12.0 – smidigare
 
 - **Ctrl+S direkt efter att du öppnat ett projekt delas.** FLSync hittar projektfilen via namnet i FL:s titelrad, i FL:s projektmapp, om det bara finns en fil med det namnet. Förut syntes en sparning först när FL hade något osparat, och automatisk sparning kom inte igång förrän dess.

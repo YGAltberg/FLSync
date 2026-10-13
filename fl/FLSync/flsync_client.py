@@ -85,6 +85,9 @@ AUTOSAVE_INTERVAL = 5.0         # ...and at most this often
 PULL_IDLE = 2.0                 # someone else's version is loaded once nothing changed here for this long,
 PULL_COUNTDOWN = 3.0            # ...and FL said so this long before
 FULL_REFRESH = 8                # an OnRefresh with this many flags is FL refreshing everything, not an edit
+STRUCTURE_SAVE = 1.0            # a new channel or plugin is saved this soon, whatever else goes on
+REMOTE_ADD_TIME = 20.0          # someone's channels the bridge brings in (`adding`) take at most this long...
+REMOTE_SETTLE = 2.0             # ...and their last undo steps come this soon after `added`
 DIRTY_QUIET = 4.0               # FL with unsaved changes also saves once stopped and nothing changed for this
 DIRTY_INTERVAL = 20.0           # long, at most this often: content we didn't see goes out too (the bridge
                                 # shares such a save only if it has something live sync didn't carry)
@@ -286,6 +289,9 @@ class SyncClient:
         self.pull_at = None      # when the countdown to that ends
         self.from_idle = True    # this tick came from OnIdle (FL may be asked to save only then)
         self.next_check = 0.0    # FL with unsaved changes saves to be compared (DIRTY_INTERVAL)
+        self.structure_at = None  # when channels or plugins changed here (not by a load): saved soon
+        self.expect_fp = None    # the structure FL gets from someone's channels the bridge brings in (`adding`)
+        self.remote_until = float("-inf")  # until then, structure and undo steps are those channels coming in
         self.saved_by_itself = float("-inf")  # when FL last saved by itself
 
     # --- driven by FL's callbacks -----------------------------------------
@@ -609,6 +615,18 @@ class SyncClient:
                 self._tell("FL sparade inte när FLSync bad om det, så FLSync sparar inte av sig själv mer nu. "
                            "Spara med Ctrl+S för att dela det du gör.")
                 self.waiting_hint = "FLSync: spara med Ctrl+S för att dela det du gör"
+        elif kind == "adding":
+            # The bridge has FL open someone's new channels as presets: that
+            # change of structure, and its undo steps, aren't ours to share.
+            fp = msg.get("fp")
+            self.expect_fp = fp if isinstance(fp, str) else None
+            self.remote_until = now + REMOTE_ADD_TIME
+        elif kind == "added":
+            # Channels someone added came in live (the bridge had FL open them as presets).
+            self.remote_until = min(self.remote_until, now + REMOTE_SETTLE)
+            what = ", ".join(_names(msg.get("what"), 5)) or "kanaler"
+            log("%s lade till %s. Det finns nu här, med samma inställningar." % (_who(msg.get("by")), what))
+            self.waiting_hint = "FLSync: %s lade till %s" % (_who(msg.get("by")), what)
         elif kind == "pull":
             # Someone shared a version FL hasn't got: it is saved and merged in
             # once FL is stopped and nothing changes here (_save_by_itself).
@@ -943,7 +961,10 @@ class SyncClient:
 
     def _edited(self, key, now):
         """A change was seen here: a live value (a key that means the same in
-        the session), or else content, which only a saved version can carry."""
+        the session), or else content, which only a saved version can carry
+        (not while the bridge brings someone's channels in: `adding`)."""
+        if key is None and now < self.remote_until:
+            return
         self.local_at = max(self.local_at, now)
         if key is not None and self._key_ok(key):
             self.live_times.append(now)
@@ -972,7 +993,7 @@ class SyncClient:
 
     def _forget_content(self):
         self.content, self.undo_steps, self.marks = 0, [], None
-        self.pull = self.pull_at = None
+        self.pull = self.pull_at = self.structure_at = None
 
     def _save_by_itself(self, now):
         """Content goes out without Ctrl+S: FL saves by itself once nothing has
@@ -996,10 +1017,13 @@ class SyncClient:
             elif now >= self.pull_at:
                 self._save_now(now, pull=True)
             return
-        if self.content and quiet >= AUTOSAVE_QUIET and not flsync_content.recording():
+        new_structure = self.structure_at is not None and now - self.structure_at >= STRUCTURE_SAVE
+        if self.content and (quiet >= AUTOSAVE_QUIET or new_structure) and not flsync_content.recording():
+            # A new instrument goes out at once, so the others get it (live, as a
+            # preset) while it's being played with here.
             self._save_now(now, pull=False)
         elif (self.status and self.status[0] and quiet >= DIRTY_QUIET and now >= self.next_check
-              and not is_playing() and not flsync_content.recording()):
+              and now >= self.remote_until and not is_playing() and not flsync_content.recording()):
             # An edit nothing above showed (FL doesn't make every edit an undo
             # step): the bridge compares the save with the session's version.
             self.next_check = now + DIRTY_INTERVAL
@@ -1010,6 +1034,7 @@ class SyncClient:
             return  # FL is in a menu or a dialog: next time
         self.next_autosave = now + AUTOSAVE_INTERVAL
         self.saved_by_itself = now
+        self.structure_at = None
         self.pull = self.pull_at = None
         # The bridge must hear it before FL saves (which holds FL up), to tell
         # this save from a Ctrl+S: it shares one with nothing new quietly.
@@ -1070,7 +1095,10 @@ class SyncClient:
         fp = self._effective_fp()
         if fp == self.my_fp:
             return
-        self._new_fp(fp)
+        remote = fp == self.expect_fp  # someone's channels the bridge brought in: like opening their version
+        if remote:
+            self.expect_fp = None
+        self._new_fp(fp, load=remote)
 
     def _new_fp(self, fp, load=False):
         """Our structure changed (as the session sees it): tell the relay, and
@@ -1079,6 +1107,7 @@ class SyncClient:
         lost, gained = was_ok - self._ok_areas(), self._ok_areas() - was_ok
         if not load:
             self._edited(None, self.last_tick)  # channels or plugins added, removed or replaced: content
+            self.structure_at = self.last_tick  # ...saved soon, also while the new plugin is played with
         if lost:  # others' values not written yet: made for what the numbers meant before
             self.inbox = {k: v for k, v in self.inbox.items() if key_area(k) not in lost}
         if not self.joined:

@@ -672,6 +672,29 @@ class AutoSaveTest(Phase4Test):
         self.tick(100, 0.1)
         self.assertEqual(self.saves(), [])  # once: until something else changes
 
+    def test_a_new_instrument_goes_out_at_once(self):
+        self.fl.project.rack.add_channel(len(self.fl.project.rack.channels), "Serum")
+        self.client.on_dirty_channel(-1, self.midi.CE_New)
+        self.tick(3, 0.1)
+        self.fl.set_volume(2, 0.4)  # played with right away: no quiet moment
+        self.tick(12, 0.1)
+        self.assertEqual(len(self.saves()), 1)  # a second after it came, all the same
+
+    def test_channels_the_bridge_brings_in_are_no_content(self):
+        rack = self.fl.project.rack
+        rack.add_channel(len(rack.channels), "Kims Serum")  # FL adds it from the preset the bridge had it open
+        expected = self.fl.script.flsync_structure.fingerprint()
+        self.link.incoming.append({"t": "adding", "fp": expected})
+        self.client.on_dirty_channel(-1, self.midi.CE_New)
+        self.fl.project.undo += 1  # (adding it is an undo step in FL)
+        self.tick(20, 0.1)
+        self.assertEqual(self.link.take("fp"), [{"t": "fp", "fp": expected, "load": True}])  # theirs, no pen
+        self.link.incoming.append({"t": "added", "by": "Kim", "what": ["Kims Serum"]})
+        self.tick(60, 0.1)
+        self.assertEqual(self.saves(), [])
+        self.assertEqual(self.client.content, 0)
+        self.assertIn("FLSync: Kim lade till Kims Serum", self.fl.project.hints)
+
     def test_unsaved_changes_nothing_showed_are_saved_to_be_compared(self):
         self.song.playing = self.song.playing_real = True
         self.fl.project.changed_flag = 1  # an edit FL made no undo step of, nothing live
