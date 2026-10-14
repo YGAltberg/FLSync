@@ -356,9 +356,13 @@ itself (flsync_content.py):
   the script. A bridge before 0.14 sent no `retry`: the script gave up at once.
 * The bridge removes the copies FL's Backup folder
   (`<user data>\FL Studio\Projects\Backup`, `<name> (overwritten on ...).flp`)
-  gets for FL's saves by itself, keeping one per project per 10 minutes: FL
+  gets for FL's saves by itself, keeping one per project file per 10 minutes
+  and always the newest (FL's File > Revert to last autosave opens it): FL
   keeps only its newest copies of all projects together (100 by default), so
-  saves every few seconds would push out everything else's.
+  saves every few seconds would push out everything else's. A save's copy is
+  the first of the project's name from 1 s before its `autosave` to 5 s after
+  (a Ctrl+S right after makes its own, later one); the one before the newest
+  goes when the next comes, only if its time and size are still as seen.
 * FL -> bridge `autosave {content, pull}` right before FL saves by itself
   (`transport.globalTransport(FPT_Save, 1, PME_System, GT_Global)`, from
   OnIdle only, FL 26.1.7 or later, never while recording): once content > 0
@@ -374,20 +378,40 @@ itself (flsync_content.py):
   saves once it is stopped, not recording and nothing changed for 2 s, after
   a 3 s countdown in the hint bar ("hämtar Kims ändringar om 3 s"); any
   change here starts it over. That save brings the version in as above.
-* **New instruments live (0.13).** FL, asked to open a plugin preset (an
-  .fst: FLhd format 0x30, events 199 version, 201 plugin, 212 window, 203
-  name, 213 state) with the FL that runs, adds a channel with that plugin
-  and its whole state at the end of its channel rack, named after the file,
-  without loading the project and also while it plays (measured in FL
-  26.1.7 with FLEX and the VST3 Serum 2: every parameter the same). Effects
-  and mixer presets opened that way always go to the master track, so they
-  aren't used. When a version arrives whose only change from FL's base is
-  channels added after all others (`flp_merge.appended_channels`, and
-  `content_changes` has nothing else; FL numbers a channel's cut groups,
-  event 132, by itself, so those don't count), and FL's channels are the
-  session's from before, the bridge writes each new channel as a preset
-  (`flp_merge.channel_preset`) to `<version folder>\Kanaler\<name>.fst`,
-  sends FL `adding {fp}` and opens them. FL's script takes that structure as
+* **New channels live (0.13, samplers 0.15).** FL, asked to open a channel
+  preset (an .fst: FLhd format 0x20, event 199 FL's version, then all the
+  channel's events from its 64 on, as FL's own Data\Patches\Channel presets
+  are) with the FL that runs, adds a channel just like it at the end of its
+  channel rack, without loading the project and also while it plays:
+  measured in FL 26.1.7 with a sampler (its sample loaded from the path in
+  its 196), FLEX and the VST3 Serum 2 (their 213 state), every event equal
+  but the channel's number, its plugin window's place (212, EPHEMERAL), its
+  cut groups (132: FL 26 gives every channel it adds the next number of its
+  own, so the sharer's FL gave the same in the same project; the preset's
+  copy came from another channel), its mixer track (104: FL puts it on the
+  master; live sync's `c/N/t` brings the sharer's) and the name (FL names it
+  after the file, as for plugin presets; `c/N/n` brings the sharer's). 0.13
+  used plugin presets (format 0x30: 199, 201, 212, 203, 213), which leave the
+  channel's own settings at FL's defaults. 0.13 and 0.14 also left cut
+  groups out of `content_changes` because of a test peer that copied a
+  channel's; a cut group is content again (0.15): should two FLs ever number
+  one differently, the difference is shared once, and then they agree.
+  Effects and mixer presets opened that way always go to the master track,
+  so they aren't used; layers, audio clips' and automation clips' channels
+  point at more of the project, so they come with the version. When a
+  version arrives whose only change from FL's base is ONE channel added
+  after all others (`flp_merge.appended_channels`, and `content_changes` has
+  nothing else; 104 is live), FL's channels are the session's from before,
+  and the channel's samples are files here (its 196, and the paths in its
+  plugin's state, as FPC and DirectWave keep them, but FL's own: else FL
+  stops at a dialog about it; a plugin's own samples keep the sharer's
+  paths, so such a channel comes with the version, which FL finds them for
+  by name next to it), the bridge writes the channel as a preset
+  (`flp_merge.channel_preset`, from the version as written here, so its
+  sample path points at this computer's copy) to `<version
+  folder>\Kanaler\<name>.fst`, sends FL `adding {fp}` and opens it. Two or
+  more new channels come with the version: FL would show a structure between
+  them, and two presets could be opened out of order or share a name. FL's script takes that structure as
   someone else's (`fp` with `load`, no pen, no content for 20 s or until 2 s
   after `added`). Once FL's channels are the version's, the bridge sends
   `added {by, what}` and the version is FL's base; else it comes in by

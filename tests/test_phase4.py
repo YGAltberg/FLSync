@@ -156,6 +156,52 @@ def add_channel_like(data, source):
     return encode(head, events)
 
 
+def add_sampler_like(data, source, sample=None):
+    """A sampler channel made from channel `source` (an audio clip's channel)
+    after the last channel, playing `sample` (None: the sample it has)."""
+    head, events = decode(add_channel_like(data, source))
+    at = anchor(events, 64, sum(1 for e, _ in events if e == 64) - 1)
+    end = next(i for i in range(at + 1, len(events)) if events[i][0] in (64, 65, 99))
+    for e in events[at:end]:
+        if e[0] == 21:
+            e[1] = bytes([0])
+        elif e[0] == 196 and sample is not None:
+            e[1] = text(sample)
+    return encode(head, events)
+
+
+def set_channel_event(data, index, eid, value):
+    """Channel `index`'s first event `eid` gets `value` (bytes)."""
+    def change(events):
+        at = anchor(events, 64, index)
+        for e in events[at + 1:]:
+            if e[0] == eid:
+                e[1] = value
+                return
+            if e[0] in (64, 65, 99):
+                break
+        raise LookupError("channel %d has no event %d" % (index, eid))
+    return edited(data, change)
+
+
+def channel_event(data, index, eid):
+    """Channel `index`'s first event `eid` (its value bytes)."""
+    _, events = decode(data)
+    at = anchor(events, 64, index)
+    for e, value in events[at + 1:]:
+        if e == eid:
+            return value
+        if e in (64, 65, 99):
+            break
+    raise LookupError("channel %d has no event %d" % (index, eid))
+
+
+def preset_sample(path):
+    """The sample path a channel preset (.fst) holds."""
+    _, events = decode(snaps.read(path))
+    return next(value.decode("utf-16-le").rstrip("\0") for eid, value in events if eid == 196)
+
+
 def channel_names(data):
     return [c.name for c in flp.parse(data).channels]
 
@@ -492,6 +538,106 @@ class AutoSyncTest(MergeSession):
         self.settle(0.3)
         self.assertFalse(any(m.get("t") == "pull" for m in self.bo.sent))
 
+    def test_a_sampler_someone_added_comes_in_live_with_its_sample(self):
+        self.start()
+        sample = snaps.save(os.path.join(self.tmp, "Anna", "Ljud", "Min kick.wav"), b"RIFF" + bytes(60) + b"kick")
+        self.anna_fl.report(snaps.FP_B)  # Anna drags her own sample into the channel rack...
+        snaps.save(self.project, touch(add_sampler_like(self.song, 1, sample), 2))  # ...and her FL saves
+        self.wait_for(lambda: self.relay.version == 2)
+        self.wait_for(lambda: any(path.endswith(".fst") for path in self.bo.opened), why="\n".join(self.bo.logs))
+        preset = [path for path in self.bo.opened if path.endswith(".fst")][0]
+        here = preset_sample(preset)  # Bo's copy of the sample, in the session project's folder
+        self.assertTrue(here.startswith(os.path.dirname(self.written)), here)
+        self.assertEqual(snaps.read(here), snaps.read(sample))
+        self.bo_fl.report(snaps.FP_B)
+        self.wait_for(lambda: self.bo.bridge.base == self.relay.snapshot["flp"])
+        self.assertIn({"t": "added", "by": "Anna", "what": ["Grv Kick 27"]}, self.bo.sent)
+        self.assertNotIn(self.written, self.bo.opened)
+
+    def live_channel_at_bo(self):
+        """Anna adds an instrument (channel 45); it comes into Bo's FL live. Her version 2."""
+        self.start()
+        self.anna_fl.report(snaps.FP_B)
+        song = add_channel_like(self.song, 28)
+        snaps.save(self.project, touch(song, 2))
+        self.wait_for(lambda: any(path.endswith(".fst") for path in self.bo.opened))
+        self.bo_fl.report(snaps.FP_B)
+        self.wait_for(lambda: self.bo.bridge.base == self.relay.snapshot["flp"])
+        return song
+
+    def test_bos_next_instrument_comes_live_to_anna(self):
+        song = self.live_channel_at_bo()
+        self.bo_fl.report("dddddd" + snaps.FP_B[6:])  # Bo adds an instrument too; his FL saves
+        self.bo_fl.send({"t": "autosave", "content": 1, "pull": False})
+        snaps.save(self.written, touch(add_channel_like(song, 0), 3))
+        self.wait_for(lambda: self.relay.version == 3, why="\n".join(self.bo.logs))
+        self.wait_for(lambda: any(path.endswith(".fst") for path in self.anna.opened), why="\n".join(self.anna.logs))
+
+    def test_a_cut_group_an_fl_numbered_otherwise_goes_out_once(self):
+        # FL 26 numbers a new channel's cut groups itself, the same in the same
+        # project. Should Bo's FL have given it another, that is shared once.
+        song = self.live_channel_at_bo()
+        self.bo_fl.send({"t": "autosave", "content": 0, "pull": False, "check": True})
+        snaps.save(self.written, touch(set_channel_event(song, 45, 132, (9).to_bytes(4, "little")), 3))
+        self.wait_for(lambda: self.relay.version == 3, why="\n".join(self.bo.logs))
+        self.assertEqual(channel_event(self.newest(), 45, 132), (9).to_bytes(4, "little"))
+
+    def test_a_cut_group_anna_set_on_a_channel_that_came_live_gets_into_bos_fl(self):
+        song = self.live_channel_at_bo()
+        self.bo_fl.send({"t": "st", "dirty": 1})
+        self.show(self.bo, self.written)
+        snaps.save(self.project, touch(set_channel_event(song, 45, 132, (3).to_bytes(4, "little")), 3))  # only that
+        self.wait_for(lambda: self.said(self.bo, {"t": "pull", "by": "Anna", "v": 3}), why="\n".join(self.bo.logs))
+        opened = len(self.bo.opened)
+        self.bo_fl.send({"t": "autosave", "content": 0, "pull": True})
+        snaps.save(self.written, touch(song, 4))
+        self.bo_fl.send({"t": "st", "dirty": 0})
+        self.assertEqual(self.saved(self.bo)["outcome"], "pulled")
+        self.wait_for(lambda: len(self.bo.opened) > opened)
+        self.assertEqual(channel_event(snaps.read(self.written), 45, 132), (3).to_bytes(4, "little"))
+
+    def test_a_cut_group_the_sharer_set_on_a_channel_that_came_live_isnt_lost(self):
+        song = self.live_channel_at_bo()
+        # In one save Anna puts that channel in a cut group and adds another one.
+        self.anna_fl.report("cccccc" + snaps.FP_B[6:])
+        snaps.save(self.project, touch(add_channel_like(set_channel_event(song, 45, 132, (3).to_bytes(4, "little")),
+                                                        0), 3))
+        self.wait_for(lambda: self.relay.version == 3)
+        self.settle(0.5)
+        self.assertEqual(len([p for p in self.bo.opened if p.endswith(".fst")]), 1)  # not live: it comes with v3
+
+    def test_two_channels_at_once_come_with_the_version(self):
+        self.start()
+        self.anna_fl.report(snaps.FP_B)
+        snaps.save(self.project, touch(add_channel_like(add_channel_like(self.song, 28), 0), 2))
+        self.wait_for(lambda: self.relay.version == 2)
+        self.settle(0.5)
+        self.assertFalse(any(path.endswith(".fst") for path in self.bo.opened))
+
+    def test_a_plugin_with_samples_of_its_own_comes_with_the_version(self):
+        # FPC, DirectWave: their state names the sharer's files, which only
+        # loading the version finds again (by name, next to the project).
+        self.start()
+        self.anna_fl.report(snaps.FP_B)
+        own = "C:\\Users\\Anna\\Ljud\\pad.wav".encode("utf-16-le")
+        song = add_channel_like(self.song, 28)
+        _, events = decode(song)
+        at = anchor(events, 64, 45)
+        state = next(v for e, v in events[at + 1:] if e == 213)
+        song = set_channel_event(song, 45, 213, state + b"\x1a\x00" + own + b"\x00\x00")
+        snaps.save(self.project, touch(song, 2))
+        self.wait_for(lambda: self.relay.version == 2)
+        self.settle(0.5)
+        self.assertFalse(any(path.endswith(".fst") for path in self.bo.opened))
+
+    def test_a_sampler_whose_sample_isnt_here_comes_with_the_version(self):
+        self.start()
+        self.anna_fl.report(snaps.FP_B)
+        snaps.save(self.project, touch(add_sampler_like(self.song, 1), 2))  # one of FL's samples Bo's FL hasn't got
+        self.wait_for(lambda: self.relay.version == 2)
+        self.settle(0.5)
+        self.assertFalse(any(path.endswith(".fst") for path in self.bo.opened))  # FL would ask where it is
+
     def test_an_instrument_fl_didnt_add_comes_with_the_version(self):
         self.start()
         self.anna_fl.report(snaps.FP_B)
@@ -586,26 +732,58 @@ class AutoSyncTest(MergeSession):
         anna = self.anna
         mine = self.backup(anna, "Beat (overwritten on 2026-10-01 at 12h00).flp", age=3600)  # a save of the user's own
         other = self.backup(anna, "Annat (overwritten on 2026-10-13 at 19h37).flp")         # another project's
-        first = self.backup(anna, "Beat (overwritten on 2026-10-13 at 19h37).flp")
-        self.anna_fl.send({"t": "autosave", "content": 1, "pull": False})
-        snaps.save(self.project, touch(change_note(self.song, 1, first_note_key(self.song, 1) + 1), 2))
-        self.wait_for(lambda: self.relay.version == 2)
-        self.assertTrue(os.path.isfile(first))  # one copy of a save by itself per BACKUP_EVERY stays
-        second = self.backup(anna, "Beat (overwritten on 2026-10-13 at 19h37)_2.flp")
-        self.anna_fl.send({"t": "autosave", "content": 1, "pull": False})
-        snaps.save(self.project, touch(change_note(self.song, 1, first_note_key(self.song, 1) + 2), 3))
-        self.wait_for(lambda: self.relay.version == 3)
+        copies = []
+        for v in (2, 3, 4):
+            copies.append(self.backup(anna, "Beat (overwritten on 2026-10-13 at 19h37)%s.flp"
+                                      % ("_%d" % v if v > 2 else "")))
+            self.anna_fl.send({"t": "autosave", "content": 1, "pull": False})
+            snaps.save(self.project, touch(change_note(self.song, 1, first_note_key(self.song, 1) + v), v))
+            self.wait_for(lambda: self.relay.version == v)
+        first, second, newest = copies
+        self.assertTrue(os.path.isfile(first))   # one copy of a save by itself per BACKUP_EVERY stays...
+        self.assertTrue(os.path.isfile(newest))  # ...and the newest (FL's Revert to last autosave opens it)
         self.assertFalse(os.path.exists(second))
-        self.assertTrue(all(os.path.isfile(path) for path in (mine, other, first)))
+        self.assertTrue(all(os.path.isfile(path) for path in (mine, other)))
         self.assertTrue(any("Backup-mapp" in line for line in anna.logs))
 
     def test_fls_backup_copy_of_a_save_of_the_users_own_stays(self):
         self.start()
-        self.anna.bridge.backups_kept["beat"] = (time.time(), "x.flp")  # a copy of a save by itself was kept just now
+        kept = self.backup(self.anna, "Beat (overwritten on 2026-10-13 at 19h37).flp")
+        stat = os.stat(kept)
+        self.anna.bridge.backups_kept[bridge_mod.file_key(self.project)] = {  # a save by itself just now
+            "every": (time.time(), "x.flp"), "newest": (kept, stat.st_mtime, stat.st_size)}
         copy = self.backup(self.anna, "Beat (overwritten on 2026-10-13 at 19h38).flp")
         snaps.save(self.project, touch(change_note(self.song, 1, first_note_key(self.song, 1) + 1), 2))  # Ctrl+S
         self.wait_for(lambda: self.relay.version == 2)
         self.assertTrue(os.path.isfile(copy))
+        self.assertTrue(os.path.isfile(kept))  # only a save by itself makes the one before it go
+
+    def test_a_ctrl_s_right_after_a_save_by_itself_keeps_its_copy(self):
+        self.start()
+        anna = self.anna
+        copies = []
+        for v in (2, 3, 4):
+            ours = self.backup(anna, "Beat (overwritten on 2026-10-13 at 19h4%d).flp" % v)
+            mine = self.backup(anna, "Beat (overwritten on 2026-10-13 at 19h4%d)_2.flp" % v, age=-3)  # Ctrl+S, 3 s later
+            copies.append((ours, mine))
+            self.anna_fl.send({"t": "autosave", "content": 1, "pull": False})
+            snaps.save(self.project, touch(change_note(self.song, 1, first_note_key(self.song, 1) + v), v))
+            self.wait_for(lambda: self.relay.version == v)
+        self.assertFalse(os.path.exists(copies[1][0]))  # FLSync's own one in the middle went
+        self.assertTrue(all(os.path.isfile(mine) for _, mine in copies))  # the user's own stay
+
+    def test_a_copy_that_changed_since_it_was_seen_stays(self):
+        self.start()
+        anna = self.anna
+        copies = []
+        for v in (2, 3, 4):
+            copies.append(self.backup(anna, "Beat (overwritten on 2026-10-13 at 19h5%d).flp" % v))
+            if v == 4:
+                snaps.save(copies[1], snaps.make_project(title="något annat"))  # replaced meanwhile
+            self.anna_fl.send({"t": "autosave", "content": 1, "pull": False})
+            snaps.save(self.project, touch(change_note(self.song, 1, first_note_key(self.song, 1) + v), v))
+            self.wait_for(lambda: self.relay.version == v)
+        self.assertTrue(os.path.isfile(copies[1]))
 
 
 class KeepaliveTest(snaps.Session):

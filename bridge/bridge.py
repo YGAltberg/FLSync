@@ -59,7 +59,9 @@ AUTOSAVE_CHECK = 15.0       # FL asked to save by itself (`autosave`) and no sav
 AUTOSAVE_RETRY = 60.0       # ...now (a dialog was open): it is asked again after this,
 AUTOSAVE_TRIES = 3          # ...until it didn't save this many times in a row
 BACKUP_EVERY = 600.0        # of the copies FL's Backup folder gets for FL's saves by itself, one per project per this stays
-BACKUP_SLACK = 2.0          # a copy this much older than the `autosave` that asked for the save is still that save's
+BACKUP_SLACK = 1.0          # a copy this much older than the `autosave` that asked for the save is still that save's
+                            # (FL saves right after sending it; MIDI may bring it a bit later),
+BACKUP_WINDOW = 5.0         # ...and one this much younger (the first after it: a Ctrl+S right after makes its own)
 BACKUP_COPY = re.compile(r" \(overwritten (?:on \d{4}-\d{2}-\d{2} )?at \d{1,2}h\d{2}\)(?:_\d+)?\.flp", re.I)
 SEARCH_DEPTH = 3            # how deep FL's projects folder is searched for the file FL's title names...
 SEARCH_KEPT = 30.0          # ...and how long what was found counts
@@ -642,6 +644,22 @@ def flp_files_named(root, name, depth):
     return found
 
 
+def remove_backup(path, mtime, size):
+    """Remove one of FL's Backup copies, if it is still the FL project it was
+    when it was seen (time and size). Whether it went."""
+    try:
+        stat = os.stat(path)
+        if stat.st_mtime != mtime or stat.st_size != size:
+            return False
+        with open(path, "rb") as f:
+            if f.read(4) != b"FLhd":
+                return False
+        os.remove(path)
+        return True
+    except OSError:
+        return False
+
+
 def parts_differ(a, b, area):
     """Whether structures `a` and `b` differ where keys of `area` point ("c"
     the channels, "m" the mixer: flsync_client.parts_differ)."""
@@ -993,7 +1011,7 @@ class Bridge:
         self.autosave = None     # {at, content, pull, seen}: FL said it saves by itself now
         self.autosave_failures = 0  # FL didn't save when it said it would, this many times in a row...
         self.autosave_retry = 0.0  # ...so it isn't asked to before this (AUTOSAVE_TRIES: never again)
-        self.backups_kept = {}   # project name (casefolded): (time, path) of the last copy FL's Backup folder kept for a save by itself
+        self.backups_kept = {}   # project file (file_key): {every: (time, path), newest: (path, time, size)} of FL's Backup copies for saves by itself
         self.backups_told = False  # the log said why those copies go
         self.pull_sent = None    # the version FL was asked to get in (`pull`)
         self.search = None       # (name, when, path or None): the last search for the file FL's title names
@@ -1969,17 +1987,19 @@ class Bridge:
         """FL copies a project into its Backup folder each time it saves it, and
         keeps only its newest copies of all projects together (File settings,
         Backup: Maximum, 100 by default): FL saving by itself every few seconds
-        would soon push out the copies of every other project. Of the copies
-        made for the save FL was asked for at `asked_at` (and before it), one
-        per project per BACKUP_EVERY stays; the session keeps the versions
-        anyway. A copy made for a save of the user's own is never touched."""
+        would soon push out the copies of every other project. The copy made
+        for the save FL was asked for at `asked_at` is the first of that
+        project's name after it; of those, one per project file per
+        BACKUP_EVERY stays, and the newest (FL's File > Revert to last autosave
+        opens that one): the one before it goes when the next comes, if it is
+        still as it was. The session keeps the versions anyway. A copy made for
+        a save of the user's own is never touched."""
         user = self.fl_dirs.get("user_dir")
         if not user:
             return
         folder = os.path.join(user, "FL Studio", "Projects", "Backup")
         stem = file_stem(path)
-        key = stem.casefold()
-        since = time.time() - (time.monotonic() - asked_at) - BACKUP_SLACK
+        asked = time.time() - (time.monotonic() - asked_at)
         try:
             entries = list(os.scandir(folder))
         except OSError:
@@ -1987,29 +2007,26 @@ class Bridge:
         copies = []
         for entry in entries:
             name = entry.name
-            if name[:len(stem)].casefold() != key or not BACKUP_COPY.fullmatch(name[len(stem):]):
+            if name[:len(stem)].casefold() != stem.casefold() or not BACKUP_COPY.fullmatch(name[len(stem):]):
                 continue
             try:
-                if entry.is_file(follow_symlinks=False) and entry.stat().st_mtime >= since:
-                    copies.append((entry.stat().st_mtime, entry.path))
+                stat = entry.stat(follow_symlinks=False)
+                if entry.is_file(follow_symlinks=False) and asked - BACKUP_SLACK <= stat.st_mtime <= asked + BACKUP_WINDOW:
+                    copies.append((stat.st_mtime, entry.path, stat.st_size))
             except OSError:
                 continue
-        removed = 0
-        for mtime, copy in sorted(copies):
-            kept = self.backups_kept.get(key)
-            if kept is not None and same_file(copy, kept[1]):
-                continue  # the one that stays (an earlier save's, just before this one)
-            if kept is None or mtime - kept[0] >= BACKUP_EVERY:
-                self.backups_kept[key] = (mtime, copy)
-                continue
-            try:
-                with open(copy, "rb") as f:
-                    if f.read(4) != b"FLhd":
-                        continue  # not an FL project after all
-                os.remove(copy)
-                removed += 1
-            except OSError:
-                continue
+        kept = self.backups_kept.setdefault(file_key(path), {"every": None, "newest": None})
+        seen = [p for p in (kept["newest"] and kept["newest"][0], kept["every"] and kept["every"][1]) if p]
+        copies = [c for c in copies if not any(same_file(c[1], p) for p in seen)]  # (an earlier save's, just before)
+        if not copies:
+            return
+        mtime, copy, size = min(copies)  # the save FL was asked for: the first copy after asking
+        older, kept["newest"] = kept["newest"], None
+        if kept["every"] is None or mtime - kept["every"][0] >= BACKUP_EVERY:
+            kept["every"] = (mtime, copy)  # the one per BACKUP_EVERY
+        else:
+            kept["newest"] = (copy, mtime, size)
+        removed = bool(older) and remove_backup(*older)
         if removed and not self.backups_told:
             self.backups_told = True
             self.log("FL lägger en kopia i sin Backup-mapp varje gång det sparar, och behåller bara de senaste "
@@ -2392,7 +2409,7 @@ class Bridge:
         self.to_fl(notice)
         if too_new or not path:
             return
-        if not self.auto_open and await self._add_live(snapshot, before, missing):
+        if not self.auto_open and await self._add_live(snapshot, before, missing, path):
             return  # FL has what the version brought, without loading anything (better than opening it)
         if self.auto_open:
             try:
@@ -2405,14 +2422,16 @@ class Bridge:
         elif snapshot.get("switch") and self.base is None:
             self._launch(path, snapshot, project.title, "switched")  # when playback stops, if nothing is unsaved
 
-    async def _add_live(self, snapshot, before, missing):
+    async def _add_live(self, snapshot, before, missing, written):
         """Channels someone added after all the others (a new instrument, a VST
-        with its sound) come into FL at once, as plugin presets FL opens: it
-        adds each one at the end of its channel rack, also while it plays,
-        without loading the project again (docs/phase5.md). Only when that is
-        all the version brought and FL's channels are the session's from
-        before it: then FL has the version, and its base moves on. Anything
-        else comes in by loading the version (_check_pull)."""
+        with its sound, a sampler with its sample) come into FL at once, as
+        channel presets FL opens: it adds each one at the end of its channel
+        rack, also while it plays, without loading the project again
+        (docs/phase5.md). Only when that is all the version brought and FL's
+        channels are the session's from before it: then FL has the version,
+        and its base moves on. Anything else comes in by loading the version
+        (_check_pull). The presets come from the version as `written` here,
+        whose sample paths point at the samples placed on this computer."""
         if not self.auto_sync or self.base is None or missing or not self.fl_fp or not before:
             return False
         if parts_differ(self.fl_fp, before, "c"):
@@ -2420,17 +2439,35 @@ class Bridge:
         base, theirs = self._cached(self.base), self._cached(snapshot["flp"])
         if base is None or theirs is None:
             return False
+        try:
+            with open(written, "rb") as f:
+                local = f.read()
+        except OSError:
+            return False
         canon = {"base": dict(self.known.get(self.base, {}).get("tokens") or {}),
                  "mine": {s["path"]: s["h"] for s in snapshot["samples"] if not s.get("plugin")}}
         try:
             added = await asyncio.to_thread(flp_merge.appended_channels, base, theirs)
+            if len(added) != 1:
+                # One channel at a time (FL saves each new one within a second):
+                # FL then never shows a structure between two of them, nor
+                # opens two presets out of order or of the same name.
+                return False
             changed = await asyncio.to_thread(flp_merge.content_changes, base, theirs, canon)
-            presets = [flp_merge.channel_preset(theirs, n) for n in added]
+            presets = [flp_merge.channel_preset(local, n) for n in added]
+            samples = [flp_merge.channel_samples(local, n) for n in added]
         except flp_merge.MergeRefused:
             return False
         rest = [key for key in changed if not (key[0] == "channel" and key[1] in added)]
-        if not added or rest or None in presets:
-            return False  # (a sampler's sample or anything else comes with the version)
+        if rest or None in presets or None in samples:
+            return False  # (a layer, an audio clip or anything else comes with the version)
+        for sample, held in samples:
+            # FL would stop at a dialog about a missing sample. A plugin's own
+            # (FPC, DirectWave) keep the sharer's paths, which only loading
+            # the version finds again, by name next to the project.
+            if not self._sample_here(sample) or not all(self._sample_here(path) for path in held
+                                                        if not flp.is_factory(path)):
+                return False
         try:
             folder = os.path.join(inside(self.projects_dir, safe_name(snapshot["name"], "FLSync-projekt")), LIVE_FOLDER)
         except TransferError:
@@ -2460,6 +2497,16 @@ class Bridge:
         self.to_fl({"t": "added", "by": snapshot["by"][:40], "what": [n[:40] for n in names[:5]]})
         self._set_base(snapshot["flp"], self.base_project)
         return True
+
+    def _sample_here(self, path):
+        """Whether a channel's sample path (None: no such channel) is a file on
+        this computer, FL's own placeholders resolved; no sample at all is fine."""
+        if path is None:
+            return False
+        if not path:
+            return True
+        local = flp.resolve(path, **{k: self.fl_dirs.get(k) for k in ("factory_dir", "user_dir", "downloads_dir")})
+        return bool(local) and os.path.isfile(local)
 
     async def version_file(self, snapshot):
         """The file FL opens for `snapshot` (the launcher's "Öppna senaste

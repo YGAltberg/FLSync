@@ -1,5 +1,14 @@
 # Ändringar
 
+## 0.15.0 – samples live
+
+- **Drar någon in ett sample i kanalracket dyker sampler-kanalen upp hos de andra inom några sekunder**, med samplet och alla kanalens inställningar, utan att projektet laddas om och även mitt i en uppspelning. Samplet skickas med och läggs i projektets mapp hos de andra. Testat i FL 2026.1.7: samplet laddades och kanalen blev lika.
+- **Nya instrument kommer nu med hela kanalen**, inte bara pluginet: kanalens egna inställningar (t.ex. kuvert, filter och tonhöjd) blir också lika. FLSync använder samma sorts kanal-preset som FL själv. Testat i FL 2026.1.7 med FLEX och Serum 2.
+- **Byter någon mixerkanal för en kanal laddas projektet inte om hos de andra** i FL 2026. Det synkas redan live, men FLSync räknade det som en ändring som måste laddas in.
+- **Ändrar någon en kanals grupp (cut group) delas det igen.** Sedan 0.13 räknades det aldrig som en ändring.
+- En kanal i taget kommer in live. Lägger någon till flera på en gång, eller ett plugin med egna samples (t.ex. FPC eller DirectWave med egna ljud), kommer de med nästa version som förut, så att FL aldrig stannar vid en dialog om ett sample som saknas.
+- FL:s backup-kopior: den senaste kopian får nu alltid ligga kvar, så att FL:s *Revert to last autosave* fungerar. Den före tas bort när nästa kommer, utom en var tionde minut. FLSync rör bara den kopia som hör till sin egen sparning, och bara om den är oförändrad, aldrig en kopia från när du trycker Ctrl+S strax efter.
+
 ## 0.14.0 – tydligare fönster, skonsamt mot FL:s backups
 
 - **Dina FL-backups trycks inte ut längre.** FL lägger en kopia av projektet i sin Backup-mapp varje gång det sparar, och behåller bara de senaste 100 kopiorna för alla projekt sammanlagt. När FL sparade av sig självt var några sekunder trängde FLSync på en kväll ut kopiorna av alla dina andra projekt. Nu tar FLSync bort kopiorna av sina egna sparningar, utom en var tionde minut. Kopior från när du själv trycker Ctrl+S rörs aldrig, och sessionens versioner finns ändå kvar i FLSync.

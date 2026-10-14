@@ -847,18 +847,40 @@ def with_plugin_channel(data, name="Bas", state=b"\x01\x02\x03\x04state"):
 
 
 class LivePresetTest(unittest.TestCase):
-    """channel_preset() and appended_channels(): someone's new instrument into
-    another FL as a plugin preset (.fst), without loading the project."""
+    """channel_preset() and appended_channels(): someone's new channel into
+    another FL as a channel preset (.fst), without loading the project."""
 
     def test_a_channel_becomes_the_preset_fl_writes(self):
         data, name = flp_merge.channel_preset(with_plugin_channel(small()), 3)
         self.assertEqual(name, "Bas")
-        self.assertEqual((data[:4], u16(data, 8), u16(data, 12)), (b"FLhd", 0x30, 96))  # a plugin preset, FL's PPQ
+        self.assertEqual((data[:4], u16(data, 8), u16(data, 12)), (b"FLhd", 0x20, 96))  # a channel preset, FL's PPQ
         events = walk(data[22:])
-        self.assertEqual([eid for eid, _ in events], [199, 201, 212, 203, 213])  # as FL's own presets have them
-        self.assertEqual(events[4][1], b"\x01\x02\x03\x04state")
-        self.assertIsNone(flp_merge.channel_preset(small(), 0))  # a sampler: no plugin to bring
+        # FL's version, then all of the channel, as FL's own channel presets have it
+        self.assertEqual([eid for eid, _ in events], [199, 64, 21, 201, 212, 203, 213, 22, 132])
+        self.assertEqual(events[6][1], b"\x01\x02\x03\x04state")
         self.assertIsNone(flp_merge.channel_preset(small(), 9))
+
+    def test_a_sampler_brings_its_sample(self):
+        data, name = flp_merge.channel_preset(small(), 0)
+        events = walk(data[22:])
+        self.assertEqual([eid for eid, _ in events], [199, 64, 21, 201, 212, 203, 22, 196])  # not the pattern after it
+        self.assertEqual(name, CHANNELS[0][0])
+        self.assertEqual(flp_merge.channel_samples(small(), 0), (CHANNELS[0][1], []))
+        self.assertEqual(flp_merge.channel_samples(with_plugin_channel(small()), 3), ("", []))
+        self.assertIsNone(flp_merge.channel_samples(small(), 9))
+
+    def test_a_plugins_own_samples_are_told_too(self):
+        state = b"\x10\x00" + "C:\\Users\\Anna\\Ljud\\pad.wav".encode("utf-16-le") + b"\x07\x00"  # as FPC keeps them
+        data = with_plugin_channel(small(), state=state)
+        self.assertEqual(flp_merge.channel_samples(data, 3), ("", ["C:\\Users\\Anna\\Ljud\\pad.wav"]))
+
+    def test_channels_that_point_at_more_dont_become_presets(self):
+        f = Flp(with_plugin_channel(small()))
+        f.events[f.index(21, start=f.channel(3)[0])][1] = bytes([5])  # an automation clip
+        self.assertIsNone(flp_merge.channel_preset(f.data(), 3))
+        f = Flp(with_plugin_channel(small()))
+        del f.events[f.index(213, start=f.channel(3)[0])]  # a plugin that didn't load where it was saved
+        self.assertIsNone(flp_merge.channel_preset(f.data(), 3))
 
     def test_only_channels_added_after_all_others_come_live(self):
         base = small()
@@ -873,19 +895,28 @@ class LivePresetTest(unittest.TestCase):
         replaced(f)
         self.assertEqual(flp_merge.appended_channels(base, f.data()), [])
 
-    def test_the_cut_groups_fl_numbers_itself_are_no_content(self):
+    def test_a_cut_group_is_content_but_a_plugin_windows_place_isnt(self):
         base = with_plugin_channel(small())
         f = Flp(base)
-        at = f.index(132, start=f.channel(3)[0])
-        f.events[at][1] = (9).to_bytes(4, "little")  # FL gave the channel it added from the preset other ones
+        f.events[f.index(212, start=f.channel(3)[0])][1] = b"\x01" * 52  # the plugin window moved
         self.assertEqual(flp_merge.content_changes(base, f.data()), [])
+        f.events[f.index(132, start=f.channel(3)[0])][1] = (9).to_bytes(4, "little")  # a cut group: shared
+        self.assertEqual(flp_merge.content_changes(base, f.data()), [("channel", 3)])
+
+    def test_a_channels_mixer_track_in_fl_2026_is_live(self):
+        base = with_plugin_channel(small())
+        f = Flp(base)
+        f.events.insert(f.channel(3)[1], ev(104, 5))  # FL 2026 keeps a channel's mixer track here (c/N/t is live)
+        changed = Flp(base)
+        changed.events.insert(changed.channel(3)[1], ev(104, 2))
+        self.assertEqual(flp_merge.content_changes(f.data(), changed.data()), [])
 
     def test_fls_own_projects_give_presets(self):
         data = read(THIEF)
         preset, name = flp_merge.channel_preset(data, 28)
         self.assertEqual(name, "Piano Dark")
         flp._chunk(preset)  # FL's format
-        self.assertEqual([eid for eid, _ in walk(preset[22:])][:2], [199, 201])
+        self.assertEqual([eid for eid, _ in walk(preset[22:])][:3], [199, 64, 21])
 
 
 # --- FL's own projects -----------------------------------------------------------------

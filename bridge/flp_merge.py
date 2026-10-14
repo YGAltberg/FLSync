@@ -161,15 +161,14 @@ PER_ID = frozenset(("head", "links", "arrtail", "notes", "mixer"))
 # a save that changed nothing else needn't become a version (content_changes).
 LIVE_EVENTS = {
     "head": frozenset((11, 17, 18, 66, 93, 156)),        # main swing, time signature, tempo (old and fine)
-    "channel": frozenset((0, 22, 128, 203, 219, 229)),    # on/off, mixer track, color, name, levels
+    "channel": frozenset((0, 22, 104, 128, 203, 219, 229)),  # on/off, mixer track (22; 104 in FL 2026), color, name, levels
     "insert": frozenset((95, 149, 204, 235, 236)),       # icon, color, name, routing, the track's settings
     "pattern": frozenset((150, 193)),                    # color, name
 }
 LIVE_KINDS = frozenset(("mixer", "track"))               # mixer levels, playlist tracks: all of it is live
-# ...and what FL numbers by itself, so the same channel differs between two
-# FLs: a channel's cut groups (132), which FL gave a channel it added from a
-# preset otherwise than the sharer's FL had (measured in FL 26.1.7).
-ASSIGNED_EVENTS = {"channel": frozenset((132,))}
+# A channel's cut groups (132) are content: FL 26 gives each channel it adds
+# (from the browser or a preset) the next number of its own, so two FLs with
+# the same project give a new channel the same (measured in FL 26.1.7).
 HEAD_PARTS = {194: "titeln", 156: "tempot", 195: "kommentarerna", 206: "genren", 207: "artisterna",
               197: "webbadressen", 231: "kanalgrupperna", 216: "kontrollkopplingarna"}
 
@@ -231,32 +230,47 @@ def content_changes(base, mine, canon=None):
     return changed
 
 
-PRESET_EVENTS = (PLUGIN, 212, NAME, STATE)  # what FL's plugin presets (.fst) hold: plugin, window, name, state
-PRESET_FORMAT = 0x30   # FLhd's format word of a plugin preset (FL's own .fst files)
+PRESET_FORMAT = 0x20   # FLhd's format word of a channel preset (FL's own Data\Patches\Channel presets)
+PRESET_TYPES = (0, 2)  # a sampler, a plugin's channel; layers, audio clips and automation point at more
 
 
 def channel_preset(project, n):
-    """Channel n of `project` as a plugin preset: (.fst bytes, the channel's
-    name). FL, asked to open it, adds a channel with that plugin and its whole
-    state at the end of the channel rack, named as the file, without loading
-    the project again (measured in FL 26.1.7, a VST3 too). None if the project
-    has no such channel or it holds no plugin."""
+    """Channel n of `project` as a channel preset: (.fst bytes, the channel's
+    name). FL, asked to open it, adds a channel just like it at the end of the
+    channel rack, with all its settings and its sample or its plugin's whole
+    state, without loading the project again (measured in FL 26.1.7 with a
+    sampler, FLEX and Serum 2: everything equal but what FL sets by itself,
+    its mixer track too, which live sync brings). The preset is the channel's events
+    after FL's version, as FL writes its own. None if the project has no such
+    channel, or it is of another kind than PRESET_TYPES, or a plugin's channel
+    without the plugin's state."""
+    p = _Project("theirs", project, None)
+    chunk = p.get(("channel", n))
+    if chunk is None or p.events[0][0] != VERSION:
+        return None
+    kind, plugin = _generator(chunk)
+    kind = None if kind is None else int.from_bytes(kind, "little")
+    if kind not in PRESET_TYPES:
+        return None
+    if kind == 2 and (not plugin or not any(p.events[i][0] == STATE for i in range(chunk.lo, chunk.hi))):
+        return None  # a plugin that didn't load where it was saved: nothing to bring
+    body = p.data[p.events[0][1]:p.events[0][3]] + chunk.raw()
+    data = (b"FLhd" + (6).to_bytes(4, "little") + PRESET_FORMAT.to_bytes(2, "little") + (1).to_bytes(2, "little")
+            + p.ppq.to_bytes(2, "little") + b"FLdt" + len(body).to_bytes(4, "little") + body)
+    return data, _channel_name(chunk)
+
+
+def channel_samples(project, n):
+    """The samples channel n of `project` plays: (its sample path, "" if none;
+    the paths in its plugin's state, as for FPC or DirectWave), or None if
+    there is no such channel."""
     p = _Project("theirs", project, None)
     chunk = p.get(("channel", n))
     if chunk is None:
         return None
-    picked, seen = [], set()
-    for i in range(chunk.lo, chunk.hi):
-        eid = p.events[i][0]
-        if eid in PRESET_EVENTS and eid not in seen:
-            seen.add(eid)
-            picked.append(p.data[p.events[i][1]:p.events[i][3]])
-    if PLUGIN not in seen or STATE not in seen:
-        return None  # a sampler or audio channel: no plugin to bring
-    body = p.data[p.events[0][1]:p.events[0][3]] + b"".join(picked)  # FL's version first, as FL writes them
-    data = (b"FLhd" + (6).to_bytes(4, "little") + PRESET_FORMAT.to_bytes(2, "little") + (1).to_bytes(2, "little")
-            + p.ppq.to_bytes(2, "little") + b"FLdt" + len(body).to_bytes(4, "little") + body)
-    return data, _channel_name(chunk) or chunk.first_text(PLUGIN)
+    inside = [path for i in range(chunk.lo, chunk.hi) if p.events[i][0] == STATE
+              for path in flp._plugin_paths(p.value(i))]
+    return chunk.first_text(SAMPLE), inside
 
 
 def appended_channels(base, theirs, canon=None):
@@ -278,7 +292,7 @@ def appended_channels(base, theirs, canon=None):
 
 def _content(chunk):
     """A chunk's canonical events without those live sync carries."""
-    skip = LIVE_EVENTS.get(chunk.key[0], frozenset()) | ASSIGNED_EVENTS.get(chunk.key[0], frozenset())
+    skip = LIVE_EVENTS.get(chunk.key[0], frozenset())
     return tuple(event for event in chunk.canon() if event[0] not in skip)
 
 
