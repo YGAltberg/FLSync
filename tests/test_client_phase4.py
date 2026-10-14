@@ -13,6 +13,7 @@ wire format.
 import os
 import time
 import unittest
+from unittest import mock
 
 from fake_fl import ROOT, FakeFL, load_module
 from test_client import FakeLink
@@ -21,6 +22,11 @@ wire = load_module("wire_for_phase4_tests", os.path.join(ROOT, "bridge", "wire.p
 
 KIM = {"id": "c2", "name": "Kim", "app": "fl"}
 OTHER_FP = "0123456789ab"
+
+def opened_without_time(messages):
+    """`opened` messages without `took` (how long the load took: real time here)."""
+    return [{k: v for k, v in m.items() if k != "took"} for m in messages]
+
 
 
 class Phase4Test(unittest.TestCase):
@@ -357,19 +363,173 @@ class StatusTest(Phase4Test):
         self.assertEqual(self.st(), [{"dirty": 1, "playing": False}])
 
 
+class ViewTest(Phase4Test):
+    """After the bridge had FL open someone's version (which brings that
+    version's view), FL is where the user was (flsync_view)."""
+
+    def be_somewhere(self):
+        p = self.fl.project
+        p.rack.selected, p.mixer.selected = {2}, 3
+        p.windows.focused, p.windows.selection = 0, (384, 768)  # the mixer in front, a playlist selection
+        self.tick(30, 0.1)  # (noted every second)
+
+    def opened_by_fl(self):
+        p = self.fl.project
+        p.rack.selected, p.mixer.selected = {0}, 0  # as the version has it
+        p.windows.focused, p.windows.selection = 1, (-1, -1)
+
+    def test_where_you_were_comes_back_after_the_bridge_opens_a_version(self):
+        self.join()
+        self.be_somewhere()
+        self.link.incoming.append({"t": "reopening"})
+        self.tick()
+        self.load(change=self.opened_by_fl)
+        self.tick(20, 0.1)
+        p = self.fl.project
+        self.assertEqual((p.rack.selected, p.mixer.selected), ({2}, 3))
+        self.assertEqual((p.windows.focused, p.windows.selection), (0, (384, 768)))
+        self.assertEqual(p.undo, 0)  # none of it an edit
+
+    def test_a_project_you_opened_yourself_stays_as_it_opens(self):
+        self.join()
+        self.be_somewhere()
+        self.load(change=self.opened_by_fl)  # no `reopening`: the user opened it
+        self.tick(20, 0.1)
+        p = self.fl.project
+        self.assertEqual((p.rack.selected, p.mixer.selected, p.windows.focused), ({0}, 0, 1))
+
+    def test_a_channel_that_isnt_the_same_one_any_more_isnt_selected(self):
+        self.join()
+        self.be_somewhere()
+        self.link.incoming.append({"t": "reopening"})
+        self.tick()
+        self.load(change=lambda: (self.opened_by_fl(), setattr(self.fl.project.rack.channels[2], "name", "Annan")))
+        self.tick(20, 0.1)
+        self.assertEqual(self.fl.project.rack.selected, {0})
+
+
+class FetchTest(Phase4Test):
+    """Someone's notes into the piano rolls without opening their version
+    (flsync_fetch): FL's script opens each piano roll, then its Tools menu, and
+    runs "FLSync hämta noter" from it, as the bridge says."""
+
+    def setUp(self):
+        super().setUp()
+        self.join()
+        w = self.fl.project.windows
+        w.scripts += ["FLSync hämta noter", "FLSync skicka noter"]
+        self.up = len(w.scripts) - sorted(w.scripts, key=str.casefold).index("FLSync hämta noter")
+
+    def offer(self, items=([2, 4, "Bas"],)):
+        self.link.incoming.append({"t": "notes_in", "nonce": "n1", "by": "Kim", "v": 7, "up": self.up,
+                                   "items": [list(i) for i in items]})
+        self.tick(3)
+
+    def test_each_piano_roll_gets_its_notes_through_the_fetch_script(self):
+        p, w = self.fl.project, self.fl.project.windows
+        p.rack.selected, w.focused = {1}, 0  # where the user is: channel 1, the mixer in front
+        self.tick(30, 0.1)
+        self.offer(items=([1, 4, "Bas"], [1, 6, "Lead"]))
+        self.assertEqual(self.link.take("notes_at"), [{"t": "notes_at", "nonce": "n1", "i": 0}])
+        self.assertEqual(w.piano_roll, (1, 4))  # FL shows that channel's piano roll
+        self.link.incoming.append({"t": "notes_go", "nonce": "n1", "i": 0})
+        self.tick(10, 0.1)  # (the piano roll in front a moment first)
+        self.assertEqual(w.ran, ["FLSync hämta noter"])  # from the Tools menu, counted from its end
+        self.link.incoming.append({"t": "notes_done", "nonce": "n1", "i": 0, "ok": True})
+        self.tick(3)
+        self.assertEqual(self.link.take("notes_at"), [{"t": "notes_at", "nonce": "n1", "i": 1}])
+        self.assertEqual(w.piano_roll, (1, 6))
+        self.link.incoming.append({"t": "notes_go", "nonce": "n1", "i": 1})
+        self.tick(10, 0.1)  # (the piano roll in front a moment first)
+        self.link.incoming.append({"t": "notes_done", "nonce": "n1", "i": 1, "ok": True})
+        self.tick(3)
+        self.assertEqual(self.link.take("notes_end"), [{"t": "notes_end", "nonce": "n1", "ok": True, "why": None}])
+        self.assertEqual(w.ran, ["FLSync hämta noter"] * 2)
+        self.assertEqual((p.rack.selected, w.focused), ({1}, 0))  # and the user is where they were
+        self.assertIn("FLSync: Kims noter kom in", p.hints)
+
+    def test_not_while_fl_plays(self):
+        self.song.playing = self.song.playing_real = True
+        self.offer()
+        self.tick(20, 0.1)
+        self.assertEqual(self.link.take("notes_at"), [])
+        self.song.playing = self.song.playing_real = False
+        self.tick(3)
+        self.assertEqual(len(self.link.take("notes_at")), 1)
+
+    def test_no_answer_closes_the_menu_and_gives_up(self):
+        self.offer()
+        self.link.incoming.append({"t": "notes_go", "nonce": "n1", "i": 0})
+        self.fl.project.modules["ui"].enter = lambda: 1  # (nothing runs, the menu stays open: nothing answers)
+        self.tick(3)
+        self.tick(80, 0.1)
+        self.assertEqual(self.link.take("notes_end"), [{"t": "notes_end", "nonce": "n1", "ok": False,
+                                                         "why": "inget svar"}])
+        self.assertIsNone(self.fl.project.windows.menu)
+
+    def test_a_later_piano_roll_waits_while_fl_plays(self):
+        p, w = self.fl.project, self.fl.project.windows
+        p.rack.selected, w.focused = {1}, 0  # where the user is: channel 1, the mixer in front
+        self.tick(30, 0.1)
+        self.offer(items=([1, 4, "Bas"], [1, 6, "Lead"]))
+        self.link.take("notes_at")
+        self.link.incoming.append({"t": "notes_go", "nonce": "n1", "i": 0})
+        self.tick(10, 0.1)
+        self.link.incoming.append({"t": "notes_done", "nonce": "n1", "i": 0, "ok": True})
+        self.song.playing = self.song.playing_real = True  # the user is back, and plays
+        self.tick(20, 0.1)
+        self.assertEqual(self.link.take("notes_at"), [])  # (jumping to a pattern would switch what plays)
+        self.assertEqual(self.fl.project.windows.piano_roll, (1, 4))
+        self.tick(40, 0.1)
+        self.assertEqual(self.link.take("notes_end"), [{"t": "notes_end", "nonce": "n1", "ok": False,
+                                                         "why": "FL var upptaget"}])
+        self.assertEqual((p.rack.selected, w.focused), ({4}, 3))  # (nor is the view put back while it plays)
+
+    def test_the_channel_is_selected_by_its_place_in_the_whole_channel_rack(self):
+        self.offer()  # (a group shown in the channel rack has its own numbers)
+        self.assertEqual(self.fl.project.windows.selects[-1], (4, 1))
+
+    def test_another_project_opening_ends_it(self):
+        p, w = self.fl.project, self.fl.project.windows
+        p.rack.selected, w.focused = {1}, 0  # where the user is: channel 1, the mixer in front
+        self.tick(30, 0.1)
+        self.offer()
+        self.assertEqual(len(self.link.take("notes_at")), 1)
+        self.assertEqual((p.rack.selected, w.focused), ({4}, 3))  # the piano roll FLSync opened
+        self.load()  # the user opens another project meanwhile
+        self.assertEqual(self.link.take("notes_end"), [{"t": "notes_end", "nonce": "n1", "ok": False,
+                                                         "why": "ett annat projekt"}])
+        self.assertEqual((p.rack.selected, w.focused), ({4}, 3))  # (the old project's view isn't put on the new one)
+        self.tick(20, 0.1)
+        self.assertEqual(self.link.take("notes_at"), [])
+
+    def test_notes_changed_here_stay(self):
+        self.offer()
+        self.link.incoming.append({"t": "notes_go", "nonce": "n1", "i": 0})
+        self.tick(10, 0.1)  # (the piano roll in front a moment first)
+        self.link.incoming.append({"t": "notes_done", "nonce": "n1", "i": 0, "ok": False})  # (the script's `expect`)
+        self.tick(3)
+        self.assertEqual(self.link.take("notes_end"), [{"t": "notes_end", "nonce": "n1", "ok": False,
+                                                         "why": "noterna byttes inte ut"}])
+
+    @property
+    def song(self):
+        return self.fl.project.song
+
+
 class OpenedTest(Phase4Test):
     def test_every_project_load_is_reported_to_the_bridge(self):
         fp = self.client.local_fp
         self.load()  # not in a session
-        self.assertEqual(self.link.take("opened"), [{"t": "opened", "fp": fp}])
+        self.assertEqual(opened_without_time(self.link.take("opened")), [{"t": "opened", "fp": fp}])
         self.join()
         self.load()  # the same project again
-        self.assertEqual(self.link.take("opened"), [{"t": "opened", "fp": fp}])
+        self.assertEqual(opened_without_time(self.link.take("opened")), [{"t": "opened", "fp": fp}])
         self.load(change=self.add_channel)
         self.assertNotEqual(self.client.local_fp, fp)
-        self.assertEqual(self.link.take("opened"), [{"t": "opened", "fp": self.client.local_fp}])
+        self.assertEqual(opened_without_time(self.link.take("opened")), [{"t": "opened", "fp": self.client.local_fp}])
         self.load(self.midi.PL_LoadError)
-        self.assertEqual(self.link.take("opened"), [])
+        self.assertEqual(opened_without_time(self.link.take("opened")), [])
 
     def test_opened_has_the_fingerprint_fl_reads_here(self):
         self.join(fp=OTHER_FP)
@@ -377,7 +537,7 @@ class OpenedTest(Phase4Test):
         self.tick(3)
         self.load()
         self.assertEqual(self.client.my_fp, OTHER_FP)
-        self.assertEqual(self.link.take("opened"), [{"t": "opened", "fp": self.client.local_fp}])
+        self.assertEqual(opened_without_time(self.link.take("opened")), [{"t": "opened", "fp": self.client.local_fp}])
         self.assertNotEqual(self.client.local_fp, OTHER_FP)
 
 
@@ -405,7 +565,7 @@ class HoldTest(Phase4Test):
         self.tick(10)
         self.assertEqual((self.fl.volume(3), self.fl.volume(2)), (0.45, 0.5))
         # The values that waited don't push the save's outcome out of the hint bar.
-        self.assertEqual(self.last_hint(), "FLSync: sammanslaget med Kims ändringar, öppnas när du stoppar uppspelningen")
+        self.assertEqual(self.last_hint(), "FLSync: sammanslaget med Kims ändringar, öppnas när du tar en paus (Ctrl+S nu)")
         self.remote(("m/4/v", 0.3))  # and live again
         self.tick(10)
         self.assertEqual(self.fl.volume(4), 0.3)
@@ -549,7 +709,7 @@ class SavedTest(Phase4Test):
             ({"outcome": "merged", "v": 5, "with": ["Kim"], "open": "now", "conflicts": 2, "taken": 3},
              "FLSync: sammanslaget med Kims ändringar (2 krockar, dina behölls), öppnar den gemensamma versionen"),
             ({"outcome": "merged", "with": ["Kim", "Jonas"], "open": "later"},
-             "FLSync: sammanslaget med Kims och Jonas ändringar, öppnas när du stoppar uppspelningen"),
+             "FLSync: sammanslaget med Kims och Jonas ändringar, öppnas när du tar en paus (Ctrl+S nu)"),
             ({"outcome": "merged", "with": ["Kim", "Bo", "Max"], "open": "no", "conflicts": 1},
              "FLSync: sammanslaget med Kims, Bos och Max ändringar (1 krock, din behölls), "
              "spara igen (Ctrl+S) för att öppna den"),
@@ -560,7 +720,7 @@ class SavedTest(Phase4Test):
              "FLSync: hämtar Kims version, spara igen (Ctrl+S) för att öppna den"),
             ({"outcome": "unchanged"}, None),
             ({"outcome": "unchanged", "open": "later"},
-             "FLSync: inget nytt att dela, öppnas när du stoppar uppspelningen"),
+             "FLSync: inget nytt att dela, öppnas när du tar en paus (Ctrl+S nu)"),
             ({"outcome": "unrelated"},
              "FLSync: projektet hör inte till sessionen, öppna sessionens version i FLSync-fönstret"),
             ({"outcome": "replaced", "with": ["Kim"], "why": "kanaler borttagna"},
@@ -602,7 +762,7 @@ class SavedTest(Phase4Test):
         self.link.incoming.append({"t": "ack", "l": True, "s": 1})
         self.link.incoming.append({"t": "snapshot", "v": 2, "name": "Beat", "fp": self.client.my_fp, "by": 5,
                                    "from": "c2", "how": ["save"], "merged": "Kim"})
-        self.shown("FLSync: 5 delade en ny version av Beat")
+        self.shown("FLSync: någon delade en ny version av 'Beat'")
 
 
 class SnapshotHowTest(Phase4Test):
@@ -618,8 +778,8 @@ class SnapshotHowTest(Phase4Test):
         self.notice(2, fp, "save")
         self.shown("FLSync: Kim har sparat, tryck Ctrl+S för att få med ändringarna")
         self.assertTrue(self.logged("spara (Ctrl+S) för att få med Kims ändringar"))
-        self.notice(3, fp, "open")
-        self.shown("FLSync: Kim delade en ny version av Beat")
+        self.notice(3, fp, "open")  # (FL doesn't open it by itself: the FLSync window does)
+        self.shown("FLSync: Kim delade en ny version av 'Beat'")
         self.notice(4, fp, "save", by=None)
         self.shown("FLSync: någon har sparat, tryck Ctrl+S för att få med ändringarna")
         self.notice(5, fp, "save", by="A", sender="c1")  # our own: as before
@@ -671,6 +831,58 @@ class AutoSaveTest(Phase4Test):
         self.assertEqual(calls, [("globalTransport", 92, 1, 8)])  # FPT_Save, as the main window's Ctrl+S
         self.tick(100, 0.1)
         self.assertEqual(self.saves(), [])  # once: until something else changes
+
+    def test_not_halfway_through_someones_notes(self):
+        w = self.fl.project.windows
+        w.scripts += ["FLSync hämta noter"]
+        up = len(w.scripts) - sorted(w.scripts, key=str.casefold).index("FLSync hämta noter")
+        self.link.incoming.append({"t": "notes_in", "nonce": "n1", "by": "Kim", "v": 7, "up": up,
+                                   "items": [[1, 4, "Bas"], [1, 6, "Lead"]]})
+        self.tick(3)
+        self.link.incoming.append({"t": "notes_go", "nonce": "n1", "i": 0})
+        self.tick(10, 0.1)
+        self.edit()  # the fetch script put Kim's notes in the first piano roll: an undo step
+        self.link.incoming.append({"t": "notes_done", "nonce": "n1", "i": 0, "ok": True})
+        self.tick(45, 0.1)  # the next one takes a while
+        self.assertEqual(self.saves(), [])  # a save now would have half of Kim's notes
+        self.link.incoming.append({"t": "notes_go", "nonce": "n1", "i": 1})
+        self.tick(10, 0.1)
+        self.edit()
+        self.link.incoming.append({"t": "notes_done", "nonce": "n1", "i": 1, "ok": True})
+        self.tick(3)
+        self.assertEqual(len(self.link.take("notes_end")), 1)
+        self.tick(45, 0.1)
+        self.assertEqual([m["pull"] for m in self.saves()], [False])  # then all of them, in one save
+
+    def test_a_slow_save_makes_fl_save_by_itself_only_when_stopped(self):
+        # Heavy plugins can make a save hold FL up: mid-playback it would stutter.
+        clock = iter([0.0, 1.5])
+        with mock.patch.object(self.fl.script.flsync_client.time, "monotonic", lambda: next(clock)):
+            self.edit()
+            self.tick(30, 0.1)
+            self.assertEqual(len(self.saves()), 1)  # it took 1.5 s
+        self.assertTrue(self.client.slow_save)
+        self.song.playing = self.song.playing_real = True
+        self.tick(20, 0.1)  # (starting playback is a live change: an edit right with it would count as that)
+        self.edit()
+        self.tick(300, 0.1)
+        self.assertEqual(self.saves(), [])  # not while it plays
+        self.song.playing = self.song.playing_real = False
+        self.tick(200, 0.1)  # (and less often: it held FL up)
+        self.assertEqual(len(self.saves()), 1)
+
+    def test_the_hint_bar_counts_down_before_the_bridge_opens_a_version(self):
+        self.link.incoming.append({"t": "opening", "by": "Kim", "in": 3, "took": 14.2})
+        self.tick()
+        self.assertIn("FLSync: öppnar Kims version om 3 s (tar ~14 s)", self.fl.project.hints)
+        self.link.incoming.append({"t": "opening", "cancel": True})  # someone touched something here
+        self.tick(30, 0.1)
+        self.assertIn("FLSync: öppnar de andras version vid nästa paus", self.fl.project.hints)
+
+    def test_the_countdown_to_get_a_version_in_says_how_long_it_takes(self):
+        self.link.incoming.append({"t": "pull", "by": "Kim", "v": 3, "took": 9.6})
+        self.tick(40, 0.1)
+        self.assertIn("FLSync: hämtar Kims ändringar om 3 s (tar ~10 s)", self.fl.project.hints)
 
     def test_a_new_instrument_goes_out_at_once(self):
         self.fl.project.rack.add_channel(len(self.fl.project.rack.channels), "Serum")
@@ -833,8 +1045,8 @@ class WireTest(unittest.TestCase):
         self.assertTrue(self.run_until(lambda: len(self.got("st")) == 2))
         self.assertEqual(self.got("st")[-1], {"t": "st", "dirty": 1, "playing": False})
         self.fl.load_project({3: 0.5})
-        self.assertTrue(self.run_until(lambda: self.got("opened") and self.got("st")[-1].get("dirty") == 0))
-        self.assertEqual(self.got("opened"), [{"t": "opened", "fp": self.fl.client.local_fp}])
+        self.assertTrue(self.run_until(lambda: opened_without_time(self.got("opened")) and self.got("st")[-1].get("dirty") == 0))
+        self.assertEqual(opened_without_time(self.got("opened")), [{"t": "opened", "fp": self.fl.client.local_fp}])
         self.assertEqual(self.fl.script._errors, 0)
 
 

@@ -14,8 +14,26 @@ STALE = 30.0  # the bridge refreshes context.json every few seconds while it run
 
 
 def folder():
-    base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Local")
-    return os.path.join(base, "FLSync", "notes")
+    """<FL's user data>\\FL Studio\\Settings\\Piano roll scripts\\FLSync, as the
+    bridge finds it: FL lets piano roll scripts read and write files in their
+    own folder only (measured in FL 26.1.7)."""
+    if os.environ.get("FLSYNC_NOTES_DIR"):  # (FLSync's tests)
+        return os.environ["FLSYNC_NOTES_DIR"]
+    tail = os.path.join("FL Studio", "Settings", "Piano roll scripts", "FLSync")
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Image-Line\Shared\Paths") as key:
+            user = winreg.QueryValueEx(key, "Shared data")[0]
+        if isinstance(user, str) and os.path.isdir(user):
+            return os.path.join(user, tail)
+    except BaseException:  # noqa: B036 - no registry here: FL's default place
+        pass
+    home = os.path.expanduser("~")
+    for documents in ("Documents", os.path.join("OneDrive", "Documents"), os.path.join("OneDrive", "Dokument")):
+        user = os.path.join(home, documents, "Image-Line")
+        if os.path.isdir(user):
+            return os.path.join(user, tail)
+    return os.path.join(home, "Documents", "Image-Line", tail)
 
 
 def read_context():
@@ -23,7 +41,7 @@ def read_context():
     try:
         with open(os.path.join(folder(), "context.json"), encoding="utf-8") as f:
             context = json.load(f)
-    except (OSError, ValueError):
+    except (OSError, ValueError, SystemError):  # (SystemError: FL 26 refuses a file outside the scripts' folder)
         return None
     stamp = context.get("time") if isinstance(context, dict) else None
     if not isinstance(stamp, (int, float)) or not time.time() - stamp <= STALE:  # not: NaN is never fresh
@@ -50,7 +68,7 @@ def main():
         with open(path + ".tmp", "w", encoding="utf-8") as f:
             json.dump(out, f)
         os.replace(path + ".tmp", path)  # the bridge never sees half a file
-    except OSError:
+    except (OSError, SystemError):
         with open(path, "w", encoding="utf-8") as f:  # (the bridge also skips files it can't parse yet)
             json.dump(out, f)
 

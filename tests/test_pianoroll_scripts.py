@@ -75,16 +75,16 @@ def note(time_, length, number, velocity=0.8, **more):
 class PianoRollScriptTest(unittest.TestCase):
     def setUp(self):
         self.base = tempfile.mkdtemp(prefix="flsync-pr-")
-        self.folder = os.path.join(self.base, "FLSync", "notes")
+        self.folder = os.path.join(self.base, "Piano roll scripts", "FLSync")
         os.makedirs(self.folder)
-        self.old_env = os.environ.get("LOCALAPPDATA")
-        os.environ["LOCALAPPDATA"] = self.base
+        self.old_env = os.environ.get("FLSYNC_NOTES_DIR")
+        os.environ["FLSYNC_NOTES_DIR"] = self.folder  # (in FL: the scripts' own folder)
 
     def tearDown(self):
         if self.old_env is None:
-            del os.environ["LOCALAPPDATA"]
+            del os.environ["FLSYNC_NOTES_DIR"]
         else:
-            os.environ["LOCALAPPDATA"] = self.old_env
+            os.environ["FLSYNC_NOTES_DIR"] = self.old_env
         sys.modules.pop("flpianoroll", None)
         shutil.rmtree(self.base, ignore_errors=True)
 

@@ -144,7 +144,8 @@ def saved_text(msg):
     others = names_text(msg.get("with"))
     version = " (version %s)" % v if v else ""
     opening = {"now": " FL öppnar den gemensamma versionen.",
-               "later": " Den öppnas i FL när du stoppar uppspelningen.",
+               "later": " Den öppnas i FL när du tar en paus (eller nu med Ctrl+S).",
+               "stop": " Den öppnas i FL när du stoppar uppspelningen.",
                "no": " Spara igen i FL (Ctrl+S) för att öppna den, eller klicka Öppna senaste versionen."
                }.get(msg.get("open"), "")
     if outcome == "shared":
@@ -846,8 +847,11 @@ class App:
             self.pen = dict(msg) if msg.get("id") else None
         elif kind == "snapshot":
             key = (msg.get("v"), msg.get("from"))
-            if key not in self.seen_at and msg.get("from") != self.bridge.my_id and msg.get("by"):
-                self._happened("%s delade version %s" % (msg.get("by"), msg.get("v")), "shared:%s" % msg.get("by"))
+            what = [str(w) for w in msg.get("what") or [] if isinstance(w, str) and w][:4]  # once it's fetched
+            if (key not in self.seen_at or what) and msg.get("from") != self.bridge.my_id and msg.get("by"):
+                self._happened("%s delade version %s%s" % (msg.get("by"), msg.get("v"),
+                                                          " (%s)" % ", ".join(what) if what else ""),
+                               "shared:%s" % msg.get("by"))
             self.seen_at.setdefault(key, time.time())
             self.notices[key] = dict(self.notices.get(key, {}), **msg)
             for old in list(self.notices)[:-10]:
@@ -1675,8 +1679,10 @@ class App:
             state = "Din version sammanslagen med %s ändringar. " % genitive(names_text(newest.get("merged")))
             if open_now:
                 state += "Du har den öppen i FL."
-            elif bridge.to_launch:
+            elif bridge.to_launch and bridge.to_launch.get("now"):
                 state += "Den öppnas i FL när du stoppar uppspelningen."
+            elif bridge.to_launch:
+                state += "Den öppnas i FL när du tar en paus (eller nu med Ctrl+S)."
             else:
                 state += "Öppna den med knappen nedan, eller spara igen i FL (Ctrl+S)."
         elif mine:
@@ -1798,7 +1804,8 @@ def parse_args(argv):
     parser.add_argument("--projects-dir", help="mappen där andras versioner sparas")
     parser.add_argument("--data-dir", help="mapp för inställningar och bryggans filer (standard: "
                                            "%%LOCALAPPDATA%%\\FLSync; ett andra FLSync på samma dator behöver en "
-                                           "egen, och en egen --midi-port)")
+                                           "egen, och en egen --midi-port; pianorullens noter går då bara i det "
+                                           "första)")
     parser.add_argument("-v", "--verbose", action="store_true", help="logga varje ändring i sessionen")
     return parser.parse_args(argv)
 
@@ -1889,6 +1896,7 @@ def run_program(args, data_dir, system):
     if args.projects_dir:
         options["projects_dir"] = args.projects_dir
     if args.data_dir:
+        # (FL's piano roll scripts look in one folder only: notes are the first FLSync's.)
         options.update(cache_dir=os.path.join(data_dir, "cache"), notes_dir=os.path.join(data_dir, "notes"))
     # Where FL saves: FL tells nobody (its recent-files list reaches the registry
     # only when it closes), so the bridge watches the .flp files being written.

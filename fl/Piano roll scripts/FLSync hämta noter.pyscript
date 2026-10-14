@@ -1,9 +1,11 @@
 """FLSync: replace the notes in this piano roll with the session's.
 
 Run it from the piano roll: Tools > Scripts > FLSync hämta noter (Ctrl+Alt+Y
-runs the last script again). The notes are the ones someone sent for this
-pattern and channel with "FLSync skicka noter"; the FLSync bridge (bridge.py)
-keeps them in a file for this script. See docs/protocol_v2.md, "Notes".
+runs the last script again). The notes are the newest of this pattern and
+channel: someone's version, or what someone sent with "FLSync skicka noter".
+The FLSync bridge (bridge.py) keeps them in a file for this script; FLSync's
+own script in FL also runs this one by itself, when someone's notes can come in
+without loading the project. See docs/protocol_v2.md, "Notes".
 """
 from flpianoroll import *
 import json
@@ -14,8 +16,26 @@ STALE = 30.0  # the bridge refreshes context.json every few seconds while it run
 
 
 def folder():
-    base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Local")
-    return os.path.join(base, "FLSync", "notes")
+    """<FL's user data>\\FL Studio\\Settings\\Piano roll scripts\\FLSync, as the
+    bridge finds it: FL lets piano roll scripts read and write files in their
+    own folder only (measured in FL 26.1.7)."""
+    if os.environ.get("FLSYNC_NOTES_DIR"):  # (FLSync's tests)
+        return os.environ["FLSYNC_NOTES_DIR"]
+    tail = os.path.join("FL Studio", "Settings", "Piano roll scripts", "FLSync")
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Image-Line\Shared\Paths") as key:
+            user = winreg.QueryValueEx(key, "Shared data")[0]
+        if isinstance(user, str) and os.path.isdir(user):
+            return os.path.join(user, tail)
+    except BaseException:  # noqa: B036 - no registry here: FL's default place
+        pass
+    home = os.path.expanduser("~")
+    for documents in ("Documents", os.path.join("OneDrive", "Documents"), os.path.join("OneDrive", "Dokument")):
+        user = os.path.join(home, documents, "Image-Line")
+        if os.path.isdir(user):
+            return os.path.join(user, tail)
+    return os.path.join(home, "Documents", "Image-Line", tail)
 
 
 def read_context():
@@ -23,7 +43,7 @@ def read_context():
     try:
         with open(os.path.join(folder(), "context.json"), encoding="utf-8") as f:
             context = json.load(f)
-    except (OSError, ValueError):
+    except (OSError, ValueError, SystemError):
         return None
     stamp = context.get("time") if isinstance(context, dict) else None
     if not isinstance(stamp, (int, float)) or not time.time() - stamp <= STALE:  # not: NaN is never fresh
@@ -38,7 +58,7 @@ def clamp(value, low, high):
 def make_note(row, scale):
     """A Note from one row of someone else's notes, every field kept in FL's range."""
     (start, length, number, velocity, pan, release, color, fcut, fres, pitchofs, slide, porta, muted,
-     repeats) = row
+     repeats) = row[:14]
     note = Note()
     note.time = clamp(int(round(start * scale)), 0, 2 ** 31 - 1)
     note.length = clamp(int(round(length * scale)), 1, 2 ** 31 - 1)
@@ -57,27 +77,75 @@ def make_note(row, scale):
     return note
 
 
+def stored(values, scale=1.0):
+    """A note as FL stores it in the project (velocity, pan and release in 128ths,
+    the filter in 255ths): two notes FL saves alike compare equal."""
+    (start, length, number, velocity, pan, release, color, fcut, fres, pitchofs, slide, porta, muted,
+     repeats) = values[:14]
+    return (int(round(start * scale)), int(round(length * scale)), int(number), int(round(velocity * 128)),
+            int(round(pan * 128)), int(round(release * 128)), int(color), int(round(fcut * 255)),
+            int(round(fres * 255)), int(pitchofs), int(bool(slide)), int(bool(porta)), int(bool(muted)), int(repeats))
+
+
+def current():
+    rows = []
+    for i in range(score.noteCount):
+        n = score.getNote(i)
+        rows.append(stored((n.time, n.length, n.number, n.velocity, n.pan, n.release, n.color, n.fcut, n.fres,
+                            n.pitchofs, n.slide, n.porta, n.muted, n.repeats)))
+    return sorted(rows)
+
+
+def answer(auto, ok, why=None, count=0):
+    """For FLSync's own script, which ran this one: how it went (no dialogs then)."""
+    if not auto:
+        return
+    try:
+        with open(os.path.join(folder(), "fetched.json"), "w", encoding="utf-8") as f:
+            json.dump({"nonce": auto.get("nonce"), "ok": ok, "why": why, "n": count, "time": time.time()}, f)
+    except (OSError, SystemError, AttributeError):
+        pass
+
+
+def say(auto, text):
+    if auto:
+        Utils.log("FLSync: " + text)
+    else:
+        Utils.ShowMessage("FLSync: " + text)
+
+
 def main():
     context = read_context()
     if context is None:
-        Utils.ShowMessage("FLSync: bryggan (bridge.py) är inte igång, så det finns inga noter att hämta.")
+        say(None, "bryggan (bridge.py) är inte igång, så det finns inga noter att hämta.")
         return
+    auto = context.get("auto") if isinstance(context.get("auto"), dict) else None
     session = context.get("session")
     if not session:
-        Utils.ShowMessage("FLSync: ingen har skickat noter till %s i mönster %s än."
-                          % (context.get("name") or "den här kanalen", context.get("pattern")))
+        say(auto, "ingen har skickat noter till %s i mönster %s än."
+            % (context.get("name") or "den här kanalen", context.get("pattern")))
+        answer(auto, False, "inga noter")
         return
     by = session.get("by") if isinstance(session, dict) else None
     try:
         scale = score.PPQ / float(session.get("ppq") or score.PPQ)  # their timebase to ours
         notes = [make_note(row, scale) for row in session.get("notes") or []]
+        expect = session.get("expect")
+        expected = None if expect is None else sorted(stored(row, scale) for row in expect)
     except (AttributeError, TypeError, ValueError, OverflowError, ZeroDivisionError):
-        Utils.ShowMessage("FLSync: noterna från %s gick inte att läsa." % (by or "någon"))
+        say(auto, "noterna från %s gick inte att läsa." % (by or "någon"))
+        answer(auto, False, "oläsbara")
+        return
+    if expected is not None and current() != expected:
+        # Someone here changed these notes since: they are merged when FL saves, not replaced.
+        say(auto, "noterna här har ändrats sedan, så de byts inte ut (de slås ihop när FL sparar).")
+        answer(auto, False, "ändrade här")
         return
     score.clearNotes(True)
     for note in notes:
         score.addNote(note)
-    Utils.log("FLSync: hämtade %d noter från %s" % (len(notes), session.get("by")))
+    Utils.log("FLSync: hämtade %d noter från %s" % (len(notes), by))
+    answer(auto, True, count=len(notes))
 
 
 main()

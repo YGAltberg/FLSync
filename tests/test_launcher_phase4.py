@@ -207,7 +207,9 @@ class SavedTextTest(unittest.TestCase):
             ("merged", "now"): "Din version är sammanslagen med Kims ändringar (version 4). FL öppnar den gemensamma "
                                "versionen. 2 delar hade ni båda ändrat: där behölls din ändring.",
             ("pulled", "later"): "Du hade inget nytt att dela, så du får Kims version (version 4). Den öppnas i FL "
-                                 "när du stoppar uppspelningen.",
+                                 "när du tar en paus (eller nu med Ctrl+S).",
+            ("pulled", "stop"): "Du hade inget nytt att dela, så du får Kims version (version 4). Den öppnas i FL "
+                                "när du stoppar uppspelningen.",
         }
         for (outcome, opening), text in cases.items():
             msg = {"outcome": outcome, "v": 4, "with": ["Kim"], "open": opening,
@@ -300,6 +302,11 @@ class AutoSyncWindowTest(LauncherTest):
         texts = [a["text"] for a in bo.status()["activity"]]
         self.assertEqual(texts[:2], ["Du delade version 4", "Anna lade till Serum 2, som kom in live"])
         self.assertLessEqual(len(texts), flsync.ACTIVITY_SHOWN)
+        # A version someone shared, and once it is fetched what it changed: one line.
+        app._heard({"t": "snapshot", "v": 5, "from": "c9", "by": "Anna", "name": "Beat"})
+        app._heard({"t": "snapshot", "v": 5, "from": "c9", "by": "Anna", "name": "Beat", "what": ["noter", "klipp"]})
+        texts = [a["text"] for a in bo.status()["activity"]]
+        self.assertEqual(texts[:2], ["Anna delade version 5 (noter, klipp)", "Du delade version 4"])
 
 
 if __name__ == "__main__":

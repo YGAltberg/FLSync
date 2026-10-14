@@ -437,7 +437,7 @@ class ClientTest(unittest.TestCase):
         self.link.incoming.append({"t": "snapshot", "v": 2, "name": "Beat", "fp": self.structure(), "by": "Kim",
                                    "from": "c2"})
         self.tick(10)
-        self.assertEqual(self.fl.project.hints[-1], "FLSync: Kim delade en ny version av Beat")
+        self.assertEqual(self.fl.project.hints[-1], "FLSync: Kim har sparat, öppnas när du tar en paus")
         self.link.incoming.append({"t": "sets", "from": "c2", "kv": [["m/4/v", 0.1]], "s": 3})
         self.tick(3)
         self.assertEqual(self.fl.volume(4), 0.1)

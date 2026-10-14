@@ -1409,7 +1409,8 @@ class PlacesTest(unittest.TestCase):
         self.assertEqual(bridge.plugin_db,
                          os.path.join(r"C:\U\Image-Line", "FL Studio", "Presets", "Plugin database", "Installed"))
         self.assertEqual(bridge.cache_dir, os.path.join(bridge_mod.local_data_dir(), "cache"))
-        self.assertEqual(bridge.notes_dir, os.path.join(bridge_mod.local_data_dir(), "notes"))
+        self.assertEqual(bridge.notes_dir, os.path.join(r"C:\U\Image-Line", "FL Studio", "Settings", "Piano roll scripts",
+                                                        "FLSync"))  # (FL 26 lets the scripts use no other)
         self.assertFalse(bridge.auto_open)
 
 
@@ -1592,9 +1593,8 @@ class PianoRollTest(Session):
         module = types.ModuleType("flpianoroll")
         module.score, module.Note, module.Utils = Score(), test.Note, utils
         module.__all__ = ["score", "Note", "Utils"]
-        base = os.path.dirname(os.path.dirname(link.places["notes_dir"]))  # <base>\FLSync\notes
-        saved_env, saved_module = os.environ.get("LOCALAPPDATA"), sys.modules.get("flpianoroll")
-        os.environ["LOCALAPPDATA"] = base
+        saved_env, saved_module = os.environ.get("FLSYNC_NOTES_DIR"), sys.modules.get("flpianoroll")
+        os.environ["FLSYNC_NOTES_DIR"] = link.places["notes_dir"]  # (in FL: the scripts' own folder)
         sys.modules["flpianoroll"] = module
         try:
             path = os.path.join(SCRIPTS, name + ".pyscript")
@@ -1602,9 +1602,9 @@ class PianoRollTest(Session):
                 exec(compile(f.read(), path, "exec"), {"__name__": "__main__"})
         finally:
             if saved_env is None:
-                del os.environ["LOCALAPPDATA"]
+                del os.environ["FLSYNC_NOTES_DIR"]
             else:
-                os.environ["LOCALAPPDATA"] = saved_env
+                os.environ["FLSYNC_NOTES_DIR"] = saved_env
             if saved_module is None:
                 sys.modules.pop("flpianoroll", None)
             else:
@@ -1612,8 +1612,7 @@ class PianoRollTest(Session):
         return module.score.notes, messages
 
     def person_with_scripts(self, name):
-        base = os.path.join(self.tmp, name)  # the scripts find the folder from %LOCALAPPDATA%
-        return self.person(name, notes_dir=os.path.join(base, "FLSync", "notes"))
+        return self.person(name, notes_dir=os.path.join(self.tmp, name, "Piano roll scripts", "FLSync"))
 
     def test_notes_from_one_piano_roll_land_in_the_other(self):
         anna_fl, anna = self.person_with_scripts("Anna")
@@ -1640,6 +1639,44 @@ class PianoRollTest(Session):
         notes, shown = self.run_script("FLSync hämta noter", bo, [self.Note()], ppq=96)
         self.assertEqual(len(notes), 1)
         self.assertIn("ingen har skickat noter till Kick i mönster 1", shown[0])
+
+    def run_by_flsync(self, link, notes, theirs, expect):
+        """The fetch script as FLSync's script in FL runs it: no dialogs, an answer in fetched.json."""
+        folder = link.places["notes_dir"]
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, "context.json"), "w", encoding="utf-8") as f:
+            json.dump({"time": time.time(), "pattern": 2, "channel": 4, "name": "Bas", "auto": {"nonce": "n1-0"},
+                       "session": {"by": "Kim", "v": 7, "ppq": 96, "notes": theirs, "expect": expect}}, f)
+        got, shown = self.run_script("FLSync hämta noter", link, notes, ppq=96)
+        with open(os.path.join(folder, "fetched.json"), encoding="utf-8") as f:
+            return got, shown, json.load(f)
+
+    ROW = [0, 48, 60, 0.5, 0.5, 0.5, 0, 0.5, 0.5, 0, 0, 0, 0, 0]  # as the bridge decodes a note from a version
+
+    def test_flsyncs_own_script_runs_it_without_dialogs(self):
+        _, bo = self.person_with_scripts("Bo")
+        here = [self.Note(time=0, length=48, number=60, velocity=0.5, pan=0.5, release=0.5)]
+        theirs = [self.ROW[:2] + [64] + self.ROW[3:]]
+        notes, shown, answer = self.run_by_flsync(bo, here, theirs, expect=[self.ROW])
+        self.assertEqual(shown, [])
+        self.assertEqual([n.number for n in notes], [64])
+        self.assertEqual((answer["nonce"], answer["ok"], answer["n"]), ("n1-0", True, 1))
+
+    def test_notes_changed_here_since_are_left_alone(self):
+        _, bo = self.person_with_scripts("Bo")
+        here = [self.Note(time=0, length=48, number=62, velocity=0.5, pan=0.5, release=0.5)]  # Bo moved it
+        notes, shown, answer = self.run_by_flsync(bo, here, [self.ROW[:2] + [64] + self.ROW[3:]], expect=[self.ROW])
+        self.assertEqual(shown, [])
+        self.assertEqual([n.number for n in notes], [62])  # they're merged when FL saves instead
+        self.assertEqual((answer["ok"], answer["why"]), (False, "ändrade här"))
+
+    def test_the_same_notes_as_fl_stores_them_count_as_unchanged(self):
+        _, bo = self.person_with_scripts("Bo")
+        # FL keeps velocity 0.1234 in the piano roll but stores 16/128: the base said 0.125.
+        here = [self.Note(time=0, length=48, number=60, velocity=0.1234, pan=0.5, release=0.5)]
+        expect = [self.ROW[:3] + [0.125] + self.ROW[4:]]
+        _, _, answer = self.run_by_flsync(bo, here, [self.ROW], expect=expect)
+        self.assertTrue(answer["ok"])
 
 
 # --- simulated FL Studios end to end ------------------------------------------------------
@@ -1716,7 +1753,7 @@ class EndToEndTest(EndToEnd):
         self.assertEqual([s.path for s in project.samples if not s.factory],
                          [os.path.join(os.path.dirname(written), "Samples", "vox.wav")])
         self.wait_for(lambda: any("din version (1) är delad" in line for line in a.logs))
-        self.wait_for(lambda: "FLSync: A delade en ny version av Beat" in b.project.hints)
+        self.wait_for(lambda: "FLSync: A har sparat, öppnas när du tar en paus" in b.project.hints)
         self.assertTrue(b.client.synced)  # same structure: nothing pauses
         a.set_volume(4, 0.3)
         self.wait_for(lambda: b.volume(4) == 0.3)

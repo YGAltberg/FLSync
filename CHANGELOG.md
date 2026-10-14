@@ -1,5 +1,15 @@
 # Ändringar
 
+## 0.16.0 – färre omladdningar
+
+- **Ändrade någon bara noter kommer de in i din pianorulle utan att projektet laddas om.** När du tar en paus öppnar FLSync de pianorullar som ändrades, en i taget (högst åtta), kör *FLSync hämta noter* åt dig och ställer tillbaka det du hade framme. Plugins, uppspelningen och ångra-historiken är kvar; varje pianorulle blir ett ångra-steg. Har du själv ändrat samma noter under tiden rörs de inte, och versionen laddas in som förut. Testat live i FL 2026.1.7: noterna blev byte för byte desamma som hos den som sparade.
+- **Projektet laddas om först när du tar en paus:** när den som sparade har varit klar en stund (10 sekunder, eller som längst en och en halv minut) och du inte har rört tangentbord eller mus på 15 sekunder, eller har ett annat program än FL framme. Tog det 15 sekunder eller mer att öppna projektet förra gången väntar FLSync på en minuts paus i stället. Hint-raden räknar ner (`FLSync: öppnar Kims version om 3 s`), och rör du något väntar det till nästa paus. Ctrl+S hämtar in det direkt, som förut. En version som väntar på din paus öppnas aldrig om du har lämnat sessionen, stängt FL eller själv öppnat ett annat projekt under tiden.
+- **Efter en omladdning är du kvar där du var:** samma mönster, kanal, mixerkanal, fönster framme och markering i spellistan, om de finns kvar. Uppspelningspositionen följer inte med.
+- **Notscripten fungerar i FL 2026.** FL 2026 låter pianorulle-script läsa och skriva filer bara i sin egen mapp, så i 0.15 gav de ett fel där. Nu byter FLSync filer med dem i `Dokument\Image-Line\FL Studio\Settings\Piano roll scripts\FLSync`.
+- **Tunga projekt:** tar FL:s egen sparning en halv sekund eller mer (tunga plugins), sparar FL av sig självt bara när uppspelningen står still, och mer sällan.
+- Händelser och loggen säger vad en version ändrade, t.ex. "Kim ändrade noter" eller "klipp och kanaler".
+- En sparning som varken har något nytt för dig eller för de andra delas inte och laddar inte om något.
+
 ## 0.15.0 – samples live
 
 - **Drar någon in ett sample i kanalracket dyker sampler-kanalen upp hos de andra inom några sekunder**, med samplet och alla kanalens inställningar, utan att projektet laddas om och även mitt i en uppspelning. Samplet skickas med och läggs i projektets mapp hos de andra. Testat i FL 2026.1.7: samplet laddades och kanalen blev lika.

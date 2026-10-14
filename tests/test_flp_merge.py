@@ -10,6 +10,7 @@ new pattern or channel, a mixer value.
 """
 
 import os
+import struct
 import sys
 import time
 import unittest
@@ -902,6 +903,19 @@ class LivePresetTest(unittest.TestCase):
         self.assertEqual(flp_merge.content_changes(base, f.data()), [])
         f.events[f.index(132, start=f.channel(3)[0])][1] = (9).to_bytes(4, "little")  # a cut group: shared
         self.assertEqual(flp_merge.content_changes(base, f.data()), [("channel", 3)])
+
+    def test_a_patterns_notes_read_as_the_piano_roll_scripts_write_them(self):
+        def note(pos, key, channel, flags=0x4000, group=0, fine=120, repeats=0, release=64, color=0, pan=64,
+                 velocity=100, fcut=128, fres=128):
+            return struct.pack("<IHHIHHBBBBBBBB", pos, flags, channel, 48, key, group, fine, repeats, release, color,
+                               pan, velocity, fcut, fres)
+        f = Flp(small(notes=[note(0, 60, 0), note(96, 62, 1, flags=0x4008, fine=157, color=0x23, repeats=3)]))
+        notes = flp_merge.pattern_notes(f.data(), 1)
+        self.assertEqual(notes[0], [[0, 48, 60, 100 / 128, 0.5, 0.5, 0, 128 / 255, 128 / 255, 0, 0, 0, 0, 0]])
+        self.assertEqual(notes[1], [[96, 48, 62, 100 / 128, 0.5, 0.5, 3, 128 / 255, 128 / 255, 37, 1, 0, 1, 3]])
+        self.assertEqual(flp_merge.pattern_notes(f.data(), 9), {})
+        for odd in (note(0, 60, 0, group=1), note(0, 60, 0, flags=0x4001)):  # more than the scripts can give
+            self.assertIsNone(flp_merge.pattern_notes(small(notes=[odd]), 1))
 
     def test_a_channels_mixer_track_in_fl_2026_is_live(self):
         base = with_plugin_channel(small())

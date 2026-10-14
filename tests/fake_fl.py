@@ -26,7 +26,7 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)  # FL puts the script folder on the path too
 
 # One module per FL area; missing ones are skipped so areas can land one at a time.
-AREAS = ["fake_mixer", "fake_channels", "fake_plugins", "fake_song"]
+AREAS = ["fake_mixer", "fake_channels", "fake_plugins", "fake_song", "fake_ui"]
 
 _instances = itertools.count()
 

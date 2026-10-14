@@ -1351,6 +1351,9 @@ class Setup:
                 self.act("Tar bort notscriptet %s" % path, lambda p=path: s.remove_file(p))
         if not removed:
             self.say("Notscripten för pianorullen är inte installerade.")
+        data = os.path.join(folder, "FLSync")  # the files the scripts and the bridge exchange notes through
+        if s.isdir(data):
+            self.act("Tar bort FLSyncs mapp för noterna %s" % data, lambda: s.remove_tree(data))
 
     def remove_program(self):
         self.step("Programmet")

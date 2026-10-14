@@ -155,11 +155,17 @@ session's current values with `sync`.
 ## Notes (piano roll)
 
 FL's MIDI-script API can't read or write piano-roll notes. Piano roll scripts
-(`flpianoroll`) can, but only when the user runs one, and they run in their own
+(`flpianoroll`) can, but only when they're run, and they run in their own
 Python: they can't reach the FLSync script. Unlike MIDI scripts they may read
-and write files (verified in FL 2025.2.4; sockets are blocked there too). So the
+and write files: anywhere in FL 2025.2.4, but in FL 26.1.7 (Python 3.12.1)
+only in their own folder and its subfolders (anywhere else `open` raises
+SystemError; listing folders works everywhere; sockets are blocked). So the
 bridge is the go-between, through an exchange folder
-`%LOCALAPPDATA%\FLSync\notes\`:
+`<FL user data>\FL Studio\Settings\Piano roll scripts\FLSync\` (0.15 and
+earlier: `%LOCALAPPDATA%\FLSync\notes\`, which FL 26 refuses). The scripts
+find it as the bridge does: FL's user data folder from
+`HKCU\Software\Image-Line\Shared\Paths` "Shared data", else
+`<Documents>\Image-Line`; `FLSYNC_NOTES_DIR` overrides it (the tests).
 
 * The FLSync script tells its bridge which pattern and channel the piano roll
   shows: `pr {p, c, n}` (active pattern, selected channel's global index, its
@@ -180,6 +186,57 @@ bridge is the go-between, through an exchange folder
   session fingerprint changes, like the parameter state) and sends them to
   everyone; bridges tell their FL in short (`notes {p, c, by, n}`), so the
   hint bar can say that new notes are ready to fetch.
+* **Notes from a version, without opening it (0.16).** A version whose only
+  change from FL's base is notes (`content_changes` gives only `("notes",
+  p)` keys) and whose channels are FL's: the bridge reads each changed
+  pattern's notes by channel (`flp_merge.pattern_notes`; the 24-byte 224
+  records as measured in FL 26.1.7: position u32, flags u16 (0x4000 always,
+  slide 0x8), channel u16, length u32, key u16, group u16, fine pitch u8
+  (pitchofs + 120), repeats u8, release u8, color u8 (& 15; porta 0x10, muted
+  0x20), pan u8, velocity u8 (those three /128), fcut u8, fres u8 (/255); a
+  record with other flags or a group: not this way). At a pause
+  (`_at_a_break`, FL stopped and in front) it sends FL `notes_in {nonce, by,
+  v, up, items: [[p, c, name], ...]}` (at most 8 piano rolls; `up` from
+  `fetch_steps`: where "FLSync hämta noter" is from the end of the piano
+  roll's Tools menu, FL's own scripts in `<install>\System\Config\Piano roll
+  scripts` and the user's sorted by name; none if a name is in both or a
+  folder holds scripts in folders). For each item FL's script (flsync_fetch)
+  selects the pattern and channel, opens its piano roll
+  (`ui.openEventEditor(getRecEventId(c) + REC_Chan_PianoRoll, EE_PR)`) and
+  sends `notes_at {nonce, i}`; the bridge writes that item into
+  `context.json` (`session` with `notes` and `expect`, the base's notes, and
+  `auto {nonce: "<nonce>-<i>"}`) and answers `notes_go`; FL's script opens
+  the Tools menu (`globalTransport(FPT_ItemMenu)` with the piano roll in
+  front), goes `ui.up` `up` times from its end and `ui.enter`. The fetch
+  script, run by FLSync (`auto`), shows no dialogs, leaves notes alone that
+  aren't `expect` any more (compared as FL stores them: someone here changed
+  them since), and answers in `fetched.json {nonce, ok, why, n}`; the bridge
+  passes it on as `notes_done {nonce, i, ok}`. While FL's script fetches,
+  `context.json` is the item's whatever `pr` FL sends meanwhile, and FL saves
+  nothing by itself (it would have half the notes). Between piano rolls FL's
+  script waits while FL plays or a dialog or menu is open (5 s at most: "FL
+  var upptaget", and then the view stays as it is: FL may be playing); it
+  selects the channel by its global index (a display
+  group in the channel rack has numbers of its own). At the end FL's script
+  puts the user's view back (flsync_view) and sends `notes_end {nonce, ok,
+  why}`; a project load meanwhile ends it ("ett annat projekt", nothing is
+  opened then and the view isn't put back). The bridge drops a plan when
+  FL's project or channels are no longer the ones it was made for (FL opened
+  another project), when auto sync is turned off, or for a newer version
+  (`notes_in {cancel}` if FL's script began); it waits while out of the
+  session.
+  FL's next save by itself then has the version (`merge` gives neither
+  side anything new): it becomes FL's base, nothing is shared or opened.
+  Anything else (a refusal, no answer within 5 s a step or 60 s in all, a
+  newer version: `notes_in {cancel}`) and the version comes in as always,
+  opened at a pause or merged; when FL's script couldn't run the fetch script
+  at all (`NOTES_BROKEN`: "menyn", "inget svar", "oläsbara", "inga noter"),
+  it isn't asked again while the bridge runs. `fetch_steps` gives none when
+  FL's own scripts folder isn't known or can't be listed (they are in the
+  menu too), and no plan is made when the bridge's notes folder isn't the
+  one FL's piano roll scripts use (a second FLSync with `--data-dir`). Measured in FL 26.1.7: none of
+  it but the notes is an edit, and decoded notes applied and saved again are
+  byte for byte what the sharer's FL saved.
 
 ## Messages
 
@@ -289,7 +346,9 @@ disconnects lose nothing):
   newest is opened instead), `unchanged`, `unrelated` (FL's project isn't the
   session's: not shared), `replaced` (couldn't be merged, `why`; shared
   anyway) or `failed` (`why`); `with` the names merged with; `open` `"now"`,
-  `"later"` (when playback stops) or `"no"` (FL has unsaved changes again).
+  `"later"` (at a pause, 0.16; until 0.15: when playback stops), `"stop"`
+  (0.16: asked for with Ctrl+S, but FL plays: when playback stops) or `"no"`
+  (FL has unsaved changes again).
   FL holds remote values from its save until `saved` comes (at most 10 s; with
   `open: "now"` until the project load, at most 30 s).
 * The bridge's `snapshot` notice to FL may carry `how`: `"save"` (Ctrl+S
@@ -378,6 +437,8 @@ itself (flsync_content.py):
   saves once it is stopped, not recording and nothing changed for 2 s, after
   a 3 s countdown in the hint bar ("hämtar Kims ändringar om 3 s"); any
   change here starts it over. That save brings the version in as above.
+  (0.16: sent only at a pause with FL stopped, see "0.16 additions"; `pull
+  {cancel}` takes it back when the pause ends before FL saved.)
 * **New channels live (0.13, samplers 0.15).** FL, asked to open a channel
   preset (an .fst: FLhd format 0x20, event 199 FL's version, then all the
   channel's events from its 64 on, as FL's own Data\Patches\Channel presets
@@ -420,6 +481,60 @@ itself (flsync_content.py):
 * The bridge paces MIDI to FL by the clock (4000 events/s, bursts of 120).
   A hello while the welcome is still being sent doesn't restart the
   session; FL doesn't say hello again while a message is coming in.
+
+## 0.16 additions: fewer and gentler reloads
+
+* **At a pause.** Opening someone's version reloads the project (every plugin
+  again, audio stops, undo history gone), so the bridge waits for a pause
+  (`_at_a_break`): the sharer has shared nothing newer for 10 s
+  (`QUIET_SHARER`) or it has waited 90 s (`WAIT_AT_MOST`), and the user here
+  has touched no key or mouse for 15 s (`IDLE_INPUT`; 60 s, `SLOW_IDLE`, when
+  FL took 15 s or more, `SLOW_LOAD`, to open the project last time), or FL
+  isn't the program in front (Windows' GetLastInputInfo and
+  GetForegroundWindow, `user_activity`). That holds for a version FL opens
+  having nothing unsaved (until 0.15: at once), for `pull`, and for the merge
+  of a save FL made by itself (until 0.15: right after it). Ctrl+S, and the
+  save a `pull` asked for, open what they bring at once (once playback
+  stops: `saved` `open: "stop"`). `pull` is sent only while FL is stopped,
+  and taken back (`pull {cancel}`) when the pause ends before FL said it
+  saves for it (`autosave {pull: true}`; after that it isn't asked again for
+  the same version, whatever the save brought).
+  Never into an FL outside the session (left, or the relay away a moment:
+  it waits) or one that was closed (its window gone: opening the file would
+  start FL again); a version FL has already (opened by hand) isn't opened
+  again, and one waiting from before FL loaded a project is dropped (the
+  user opened another one, File > Open: what FL lacks is asked for again,
+  `pull`). A version that came while FL opened the one before waits on, and
+  as that load ends FL counts as having the version it was asked to open
+  even when the next was written over the same file meanwhile (FL read it
+  as it began). The wait for the sharer (WAIT_AT_MOST) starts again with
+  each version FL is made to open.
+* Bridge -> FL `opening {by, in, took?}`: the version opens in `in` seconds
+  (the hint bar says so; `took`: how long opening took last time; `by`: whose
+  it is, for a merge the other's); `opening {cancel}`: not now after all (a
+  key was pressed, playback started, FL got unsaved changes). `pull` carries
+  `took` too.
+* FL -> bridge `opened {fp, took}`: `took` is how long the load took, PL_Start
+  to its end (measured in FL 26.1.7: 4.8 s for the test project).
+* Bridge -> FL `reopening`, right before the bridge has FL open a version:
+  FL's script notes where the user is (flsync_view: the selected pattern and
+  channel, the mixer track, the window in front, the playlist selection,
+  noted every second) and puts it back 0.5 s after the load, where it still
+  fits (the same pattern and channel names). Measured in FL 26.1.7: opening a
+  project brings the file's view and empties the undo history, and none of
+  jumpToPattern, selectOneChannel, mixer.setTrackNumber, showWindow,
+  setFocused and arrangement.selectionSet is an edit (song position is left
+  alone: setSongPos is unreliable in pattern mode).
+* A save by itself that held FL up 0.5 s or more (heavy plugins) makes FL
+  save by itself only while stopped, and less often (10 times as long as it
+  took, at least 5 s).
+* A version that brings nothing FL lacks and FL's save that has nothing it
+  lacks (`merge` finds nothing new either way): FL has it, it becomes FL's
+  base, nothing is shared or opened.
+* The snapshot notice FL gets once a version is fetched has `what`, the
+  kinds of things it changed in words (`change_words`: noter, klipp,
+  kanaler, mönster, mixern, spellistan, markörer, projektet), for the window's
+  Händelser and the log.
 
 ## Ordering and conflicts
 

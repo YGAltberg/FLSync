@@ -286,8 +286,9 @@ Bridge -> FL:
 * `saved {outcome, v?, with?, open?, why?, conflicts?, taken?}`: `outcome` is
   `shared` (fast forward), `merged`, `pulled`, `unchanged`, `unrelated` (not
   shared), `replaced` (merge refused, newest wins: `why`), `failed` (`why`);
-  `with` the names merged with; `open` `"now"`, `"later"` (when playback stops)
-  or `"no"` (FL has unsaved changes: save again); `conflicts` how many parts
+  `with` the names merged with; `open` `"now"`, `"later"` (at a pause; until
+  0.15 when playback stops), `"stop"` (when playback stops, 0.16) or `"no"`
+  (FL has unsaved changes: save again); `conflicts` how many parts
   both changed (mine kept); `taken` how many parts came from the others.
 * `snapshot` notice + `how` (`"save"` or `"open"`), `merged`, `parent`.
 

@@ -237,6 +237,13 @@ class MergeSession(snaps.Session):
         self.open(self.bo, self.bo_fl, self.written)
         self.wait_for(lambda: self.bo.bridge.base == self.relay.snapshot["flp"], why="Bos bas blev aldrig version 1")
 
+    def old_file(self, path):
+        """Another project of the user's, saved long ago (not a save FL makes now)."""
+        snaps.save(path, touch(self.song, 7))
+        an_hour_ago = time.time() - 3600
+        os.utime(path, (an_hour_ago, an_hour_ago))
+        return path
+
     def open(self, link, fl, path):
         """FL opens `path`: its recent files name it and its script says it loaded a project."""
         link.mru = path
@@ -331,7 +338,7 @@ class MergeOnSaveTest(MergeSession):
         self.bo_fl.send({"t": "st", "dirty": 0, "playing": True})  # Bo saves while it plays
         snaps.save(self.written, touch(change_note(self.bo_content, 1, 50), 3))
         answer = self.saved(self.bo)
-        self.assertEqual((answer["outcome"], answer["open"]), ("merged", "later"), answer)
+        self.assertEqual((answer["outcome"], answer["open"]), ("merged", "stop"), answer)  # (Ctrl+S: at the stop)
         self.settle(0.3)
         self.assertEqual(self.bo.opened, [])
         self.bo_fl.send({"t": "st", "dirty": 0, "playing": False})
@@ -396,9 +403,10 @@ class MergeOnSaveTest(MergeSession):
         self.wait_for(lambda: self.anna.opened, why="\n".join(self.anna.logs))
         self.assertIsNone(self.anna.bridge.base)
         # A save of the old project isn't merged with Cy's or shared: FL opens Cy's.
+        self.anna.bridge.activity = lambda: (0.0, True)  # (she just pressed Ctrl+S)
         snaps.save(self.project, touch(rename_channel(self.song, 2, "Annas kanal"), 9))
         answer = self.saved(self.anna, 2)  # (her first: sharing version 1)
-        self.assertEqual((answer["outcome"], answer.get("with")), ("old", ["Cy"]), answer)
+        self.assertEqual((answer["outcome"], answer.get("with"), answer.get("open")), ("old", ["Cy"], "now"), answer)
         self.settle(0.3)
         self.assertEqual(self.relay.version, 2)
         self.assertEqual(len(self.anna.opened), 2)
@@ -485,6 +493,466 @@ class MergeOnSaveTest(MergeSession):
         again = bridge_mod.Bridge("127.0.0.1", self.port, lambda message: None, logger=lambda text: None,
                                   **{k: v for k, v in self.bo.places.items() if k != "opener"})
         self.assertEqual((again.base, again.base_project), (self.relay.snapshot["flp"], self.written))
+
+
+class PauseTest(MergeSession):
+    """Someone's version comes into FL (which reloads the project) at a pause:
+    the sharer stopped a while, and the user here too (docs/protocol_v2.md)."""
+
+    def start_clean(self):
+        self.start(bo_status={"dirty": 0, "playing": False})  # Bo's FL has nothing unsaved
+        return len(self.bo.opened)
+
+    def anna_saves(self, v, seconds=None):
+        snaps.save(self.project, touch(change_note(self.song, 1, first_note_key(self.song, 1) + v), seconds or v))
+        self.wait_for(lambda: self.relay.version == v)
+
+    def test_a_version_opens_once_the_sharer_pauses_after_a_word_in_the_hint_bar(self):
+        opened = self.start_clean()
+        self.bo.bridge.quiet_sharer, self.bo.bridge.open_warning = 0.8, 0.4
+        self.anna_saves(2)
+        self.assertEqual(self.received(self.bo, count=2)["what"], ["noter"])  # what it brings, for the window
+        self.settle(0.3)
+        self.assertEqual(len(self.bo.opened), opened)  # Anna may go on: not yet
+        self.wait_for(lambda: {"t": "opening", "by": "Anna", "in": 0.4} in self.bo.sent)
+        self.assertEqual(len(self.bo.opened), opened)
+        self.wait_for(lambda: len(self.bo.opened) == opened + 1)
+
+    def test_not_while_the_user_here_works(self):
+        opened = self.start_clean()
+        idle = {"s": 2.0}
+        self.bo.bridge.activity = lambda: (idle["s"], True)  # FL in front, a key pressed 2 s ago
+        self.anna_saves(2)
+        self.received(self.bo, count=2)
+        self.settle(0.5)
+        self.assertEqual(len(self.bo.opened), opened)
+        idle["s"] = bridge_mod.IDLE_INPUT + 1
+        self.wait_for(lambda: len(self.bo.opened) == opened + 1)
+
+    def test_at_once_when_fl_isnt_the_program_in_front(self):
+        opened = self.start_clean()
+        self.bo_fl.window_open = True
+        self.bo.bridge.activity = lambda: (0.5, False)  # typing in another program
+        self.anna_saves(2)
+        self.wait_for(lambda: len(self.bo.opened) == opened + 1)
+
+    def test_never_into_an_fl_that_was_closed(self):
+        # (Opening the file would start FL again.)
+        opened = self.start_clean()
+        self.bo.bridge.activity = lambda: (0.5, False)  # no FL window in front: FL's is gone
+        self.anna_saves(2)
+        self.received(self.bo, count=2)
+        self.settle(0.6)
+        self.assertEqual(len(self.bo.opened), opened)
+        self.bo_fl.window_open = True  # (it was only busy)
+        self.wait_for(lambda: len(self.bo.opened) == opened + 1)
+
+    def at_work(self):
+        """Bo uses FL until the test says he pauses (the returned function)."""
+        idle = {"s": 1.0}
+        self.bo.bridge.activity = lambda: (idle["s"], True)
+        return lambda: idle.update(s=bridge_mod.IDLE_INPUT + 1)
+
+    def test_not_into_an_fl_outside_the_session(self):
+        opened = self.start_clean()
+        pause = self.at_work()
+        self.anna_saves(2)
+        self.received(self.bo, count=2)
+        self.bo.call(self.bo.bridge.close_session)  # Bo leaves ("Lämna") before it opens
+        pause()
+        self.settle(0.6)
+        self.assertEqual(len(self.bo.opened), opened)
+
+    def test_a_version_opened_by_hand_isnt_opened_again(self):
+        opened = self.start_clean()
+        pause = self.at_work()
+        self.anna_saves(2)
+        notice = self.received(self.bo, count=2)
+        self.open(self.bo, self.bo_fl, notice["path"])  # "Öppna senaste versionen" before the pause
+        self.wait_for(lambda: self.bo.bridge.base == self.relay.snapshot["flp"])
+        pause()
+        self.settle(0.6)
+        self.assertEqual(len(self.bo.opened), opened)
+
+    def test_a_project_the_user_opens_isnt_replaced(self):
+        opened = self.start_clean()
+        pause = self.at_work()
+        self.anna_saves(2)
+        self.wait_for(lambda: self.bo.bridge.to_launch is not None)  # it waits for a pause
+        other = self.old_file(os.path.join(self.tmp, "Bo", "Annat.flp"))
+        self.open(self.bo, self.bo_fl, other)  # File > Open (FL had nothing unsaved)
+        self.wait_for(lambda: self.bo.bridge.to_launch is None)
+        pause()
+        self.settle(0.6)
+        self.assertEqual(len(self.bo.opened), opened, "\n".join(self.bo.logs))
+
+    def test_a_version_written_while_fl_opens_the_one_before_comes_after_it(self):
+        # (The same file: FL has what it read as it began opening it, not what was written over it since.)
+        opened = self.start_clean()
+        self.anna_saves(2)
+        self.wait_for(lambda: len(self.bo.opened) == opened + 1)
+        path, v2 = self.bo.opened[-1], self.relay.snapshot["flp"]
+        pause = self.at_work()
+        self.anna_saves(3)  # while Bo's FL opens version 2
+        self.wait_for(lambda: self.bo.bridge.to_launch is not None and self.bo.bridge.to_launch["v"] == 3)
+        self.open(self.bo, self.bo_fl, path)  # FL is done opening version 2
+        self.wait_for(lambda: self.bo.bridge.base == v2, why="\n".join(self.bo.logs))
+        self.assertEqual(self.bo.bridge.to_launch["v"], 3)  # (still to come)
+        pause()
+        self.wait_for(lambda: len(self.bo.opened) == opened + 2)
+
+    def test_the_word_in_the_hint_bar_is_taken_back_when_playback_starts(self):
+        opened = self.start_clean()
+        self.bo.bridge.open_warning = 1.0
+        self.anna_saves(2)
+        self.wait_for(lambda: {"t": "opening", "by": "Anna", "in": 1.0} in self.bo.sent)
+        self.bo_fl.send({"t": "st", "dirty": 0, "playing": True})
+        self.wait_for(lambda: {"t": "opening", "cancel": True} in self.bo.sent)
+        self.settle(1.2)
+        self.assertEqual(len(self.bo.opened), opened)
+
+    def test_a_project_slow_to_open_waits_for_a_longer_pause(self):
+        opened = self.start_clean()
+        idle = {"s": bridge_mod.IDLE_INPUT + 1}
+        self.bo.bridge.activity = lambda: (idle["s"], True)
+        self.bo_fl.send({"t": "opened", "fp": self.bo_fl.fp, "took": bridge_mod.SLOW_LOAD + 5})
+        self.wait_for(lambda: self.bo.bridge.last_load == bridge_mod.SLOW_LOAD + 5)
+        self.anna_saves(2)
+        self.received(self.bo, count=2)
+        self.settle(0.5)
+        self.assertEqual(len(self.bo.opened), opened)
+        idle["s"] = bridge_mod.SLOW_IDLE + 1
+        self.wait_for(lambda: len(self.bo.opened) == opened + 1)
+
+    def test_fl_saving_by_itself_opens_the_merge_at_a_pause(self):
+        self.start()
+        self.bo.bridge.activity = lambda: (2.0, True)
+        snaps.save(self.project, touch(rename_channel(self.song, 2, "Annas kanal"), 2))
+        self.wait_for(lambda: self.relay.version == 2)
+        self.bo_fl.send({"t": "autosave", "content": 1, "pull": False})  # Bo's FL saves his note by itself
+        snaps.save(self.written, touch(change_note(self.bo_content, 1, first_note_key(self.song, 1) + 1), 3))
+        self.bo_fl.send({"t": "st", "dirty": 0, "playing": False})
+        answer = self.saved(self.bo)
+        self.assertEqual((answer["outcome"], answer["open"]), ("merged", "later"), answer)
+        self.settle(0.5)
+        self.assertEqual(self.bo.opened, [])  # Bo is at work: not right after his edit
+
+    def test_a_merge_waiting_for_a_pause_is_the_others_version(self):
+        self.start()
+        idle = {"s": 2.0}
+        self.bo.bridge.activity = lambda: (idle["s"], True)
+        self.bo.bridge.open_warning = 0.2
+        snaps.save(self.project, touch(rename_channel(self.song, 2, "Annas kanal"), 2))
+        self.wait_for(lambda: self.relay.version == 2)
+        self.bo_fl.send({"t": "autosave", "content": 1, "pull": False})
+        snaps.save(self.written, touch(change_note(self.bo_content, 1, first_note_key(self.song, 1) + 1), 3))
+        self.bo_fl.send({"t": "st", "dirty": 0, "playing": False})
+        self.assertEqual(self.saved(self.bo)["open"], "later")
+        idle["s"] = bridge_mod.IDLE_INPUT + 1
+        self.wait_for(lambda: {"t": "opening", "by": "Anna", "in": 0.2} in self.bo.sent)  # (not Bo's own)
+        self.wait_for(lambda: self.bo.opened == [self.written])
+
+    def test_ctrl_s_opens_the_merge_at_once(self):
+        self.start()
+        self.bo.bridge.activity = lambda: (0.0, True)  # the user just pressed Ctrl+S
+        snaps.save(self.project, touch(rename_channel(self.song, 2, "Annas kanal"), 2))
+        self.wait_for(lambda: self.relay.version == 2)
+        snaps.save(self.written, touch(change_note(self.bo_content, 1, first_note_key(self.song, 1) + 1), 3))
+        self.bo_fl.send({"t": "st", "dirty": 0, "playing": False})
+        answer = self.saved(self.bo)
+        self.assertEqual((answer["outcome"], answer["open"]), ("merged", "now"), answer)
+        self.assertEqual(self.bo.opened, [self.written])
+
+    def test_the_pull_waits_for_a_pause_too(self):
+        self.start()
+        idle = {"s": 2.0}
+        self.bo.bridge.activity = lambda: (idle["s"], True)
+        self.bo_fl.send({"t": "st", "dirty": 1})
+        self.show(self.bo, self.written)
+        self.anna_saves(2)
+        self.received(self.bo, count=2)
+        self.settle(0.6)
+        self.assertFalse(any(m.get("t") == "pull" for m in self.bo.sent))
+        idle["s"] = bridge_mod.IDLE_INPUT + 1
+        self.wait_for(lambda: {"t": "pull", "by": "Anna", "v": 2} in self.bo.sent)
+
+    def test_a_pull_is_taken_back_when_the_pause_ends_before_fl_saves(self):
+        self.start()
+        idle = {"s": bridge_mod.IDLE_INPUT + 1}
+        self.bo.bridge.activity = lambda: (idle["s"], True)
+        self.bo_fl.send({"t": "st", "dirty": 1, "playing": False})
+        self.show(self.bo, self.written)
+        self.anna_saves(2)
+        pull = {"t": "pull", "by": "Anna", "v": 2}
+        self.wait_for(lambda: pull in self.bo.sent)
+        idle["s"] = 1.0  # Bo moves the mouse
+        self.wait_for(lambda: {"t": "pull", "cancel": True} in self.bo.sent)
+        idle["s"] = bridge_mod.IDLE_INPUT + 1
+        self.wait_for(lambda: self.bo.sent.count(pull) == 2)  # at the next pause
+
+    def test_a_pull_fl_saved_for_isnt_asked_again(self):
+        self.start()
+        idle = {"s": bridge_mod.IDLE_INPUT + 1}
+        self.bo.bridge.activity = lambda: (idle["s"], True)
+        self.bo_fl.send({"t": "st", "dirty": 1, "playing": False})
+        self.show(self.bo, self.written)
+        snaps.save(self.project, touch(rename_channel(self.song, 2, "Annas kanal"), 2))
+        self.wait_for(lambda: self.relay.version == 2)
+        pull = {"t": "pull", "by": "Anna", "v": 2}
+        self.wait_for(lambda: pull in self.bo.sent)
+        # FL saves for it: it has Anna's change already (live), and a change of Bo's she lacks.
+        self.bo_fl.send({"t": "autosave", "content": 0, "pull": True})
+        snaps.save(self.written, touch(retitle(rename_channel(self.bo_content, 2, "Annas kanal"), "Bos"), 10))
+        self.bo_fl.send({"t": "st", "dirty": 0, "playing": False})
+        self.wait_for(lambda: {"t": "saved", "outcome": "unchanged"} in self.bo.sent, why="\n".join(self.bo.logs))
+        idle["s"] = 1.0  # Bo moves the mouse...
+        self.settle(0.4)
+        idle["s"] = bridge_mod.IDLE_INPUT + 1  # ...and pauses again
+        self.settle(0.6)
+        self.assertEqual(self.bo.sent.count(pull), 1)  # not a save at every pause
+        self.assertNotIn({"t": "pull", "cancel": True}, self.bo.sent)
+
+    def test_no_pull_while_fl_plays(self):
+        self.start()
+        self.bo_fl.send({"t": "st", "dirty": 1, "playing": True})  # Bo listens, hands off
+        self.show(self.bo, self.written)
+        self.anna_saves(2)
+        self.received(self.bo, count=2)
+        self.settle(0.6)
+        self.assertFalse(any(m.get("t") == "pull" for m in self.bo.sent))
+        self.bo_fl.send({"t": "st", "dirty": 1, "playing": False})
+        self.wait_for(lambda: {"t": "pull", "by": "Anna", "v": 2} in self.bo.sent)
+
+    def test_a_save_that_has_the_newest_already_moves_the_base(self):
+        # Bo's FL got Anna's notes in another way (FLSync hämta noter): nothing to share or open.
+        self.start()
+        self.anna_saves(2)
+        snaps.save(self.written, touch(change_note(self.bo_content, 1, first_note_key(self.song, 1) + 2), 9))
+        self.wait_for(lambda: self.bo.bridge.base == self.relay.snapshot["flp"], why="\n".join(self.bo.logs))
+        self.settle(0.3)
+        self.assertEqual(self.relay.version, 2)
+        self.assertEqual(self.bo.opened, [])
+
+    def show(self, link, path):
+        link.title = "%s - FL Studio 2026" % os.path.basename(path)
+
+
+class FetchStepsTest(unittest.TestCase):
+    """bridge.fetch_steps: where "FLSync hämta noter" is in the piano roll's Tools
+    menu, counted from its end (FL's own scripts and the user's, by name)."""
+
+    def setUp(self):
+        self.tmp = snaps.tempfile.mkdtemp(prefix="flsync-steps-")
+        self.addCleanup(snaps.shutil.rmtree, self.tmp, True)
+        self.dirs = {"user_dir": os.path.join(self.tmp, "Image-Line"), "factory_dir": os.path.join(self.tmp, "FL")}
+
+    def scripts(self, user=(), factory=(), folder=None):
+        for names, base in ((user, bridge_mod.piano_roll_scripts(self.dirs)),
+                            (factory, os.path.join(self.dirs["factory_dir"], "System", "Config", "Piano roll scripts"))):
+            for name in names:
+                snaps.save(os.path.join(base, folder or "", name + ".pyscript"), b"#")
+
+    def test_it_is_counted_from_the_end_of_the_menu(self):
+        self.scripts(user=["FLSync hämta noter", "FLSync skicka noter"], factory=["Arpeggiator", "Humanize", "Euclidean"])
+        snaps.save(os.path.join(bridge_mod.piano_roll_scripts(self.dirs), "FLSync", "context.json"), b"{}")  # FLSync's
+        self.assertEqual(bridge_mod.fetch_steps(self.dirs), 3)  # Humanize, skicka, hämta: up three times
+
+    def test_without_fls_own_scripts_it_cant_be_told(self):
+        # They are in the menu too: counting only the user's would run another script.
+        self.scripts(user=["FLSync hämta noter", "FLSync skicka noter"])
+        self.assertIsNone(bridge_mod.fetch_steps(self.dirs))  # FL's folder isn't there
+        self.assertIsNone(bridge_mod.fetch_steps(dict(self.dirs, factory_dir=None)))  # nor known
+        os.makedirs(os.path.join(self.dirs["factory_dir"], "System", "Config", "Piano roll scripts"))
+        self.assertEqual(bridge_mod.fetch_steps(self.dirs), 2)
+
+    def test_a_menu_it_cant_be_sure_of_gives_none(self):
+        self.assertIsNone(bridge_mod.fetch_steps(self.dirs))  # not installed
+        self.scripts(user=["FLSync hämta noter", "Humanize"], factory=["Humanize"])
+        self.assertIsNone(bridge_mod.fetch_steps(self.dirs))  # one name twice
+
+    def test_scripts_in_folders_of_their_own_give_none(self):
+        self.scripts(user=["FLSync hämta noter"], factory=["Arpeggiator"])
+        self.scripts(user=["Mina"], folder="Egna")  # FL may show a submenu for them
+        self.assertIsNone(bridge_mod.fetch_steps(self.dirs))
+
+
+class ChangeWordsTest(unittest.TestCase):
+    def test_every_kind_of_change_has_a_word(self):
+        self.assertEqual(bridge_mod.change_words([("notes", 1), ("playlist", 0), ("notes", 2)]), ["noter", "klipp"])
+        self.assertEqual(bridge_mod.change_words([("markers", 0)]), ["markörer"])  # (the playlist's time markers)
+
+
+class NotesLiveTest(MergeSession):
+    """A version that changed only notes: Bo's FL gets them into its piano rolls
+    (its script runs "FLSync hämta noter"), without opening the version."""
+
+    def start_bo(self):
+        self.start(bo_status={"dirty": 0, "playing": False})
+        scripts = bridge_mod.piano_roll_scripts(self.bo.bridge.fl_dirs)
+        snaps.save(os.path.join(scripts, "FLSync hämta noter.pyscript"), b"# the fetch script")
+        snaps.save(os.path.join(scripts, "Mina noter.pyscript"), b"# one of the user's")
+        factory = os.path.join(self.bo.bridge.fl_dirs["factory_dir"], "System", "Config", "Piano roll scripts")
+        snaps.save(os.path.join(factory, "Humanize.pyscript"), b"# one of FL's")
+        return len(self.bo.opened)
+
+    def offered(self):
+        self.wait_for(lambda: any(m.get("t") == "notes_in" for m in self.bo.sent), why="\n".join(self.bo.logs))
+        return next(m for m in self.bo.sent if m.get("t") == "notes_in")
+
+    def fetch(self, offer, i, ok=True, why=None):
+        """What Bo's FL and its fetch script do for piano roll `i`."""
+        self.bo_fl.send({"t": "notes_at", "nonce": offer["nonce"], "i": i})
+        self.wait_for(lambda: {"t": "notes_go", "nonce": offer["nonce"], "i": i} in self.bo.sent)
+        notes_dir = self.bo.bridge.notes_dir
+        with open(os.path.join(notes_dir, "context.json"), encoding="utf-8") as f:
+            context = json.load(f)
+        snaps.save(os.path.join(notes_dir, "fetched.json"),
+                   json.dumps({"nonce": "%s-%d" % (offer["nonce"], i), "ok": ok, "why": why}).encode())
+        self.wait_for(lambda: {"t": "notes_done", "nonce": offer["nonce"], "i": i, "ok": ok} in self.bo.sent)
+        return context
+
+    def test_notes_come_into_the_piano_roll_without_opening_the_version(self):
+        opened = self.start_bo()
+        key = first_note_key(self.song, 1) + 3
+        theirs = touch(change_note(self.song, 1, key), 2)
+        snaps.save(self.project, theirs)  # Anna moves a note
+        self.wait_for(lambda: self.relay.version == 2)
+        offer = self.offered()
+        self.assertEqual(offer["up"], 3)  # (FLSync hämta noter, Humanize, Mina noter: up three times)
+        p, c = offer["items"][0][:2]
+        context = self.fetch(offer, 0)
+        self.assertEqual((context["pattern"], context["channel"]), (p, c))
+        self.assertEqual(context["auto"], {"nonce": "%s-0" % offer["nonce"]})
+        self.assertEqual(context["session"]["notes"],
+                         bridge_mod.flp_merge.pattern_notes(theirs, p)[c])  # hers, as the script writes them
+        self.assertEqual(context["session"]["expect"], bridge_mod.flp_merge.pattern_notes(self.song, p)[c])
+        self.bo_fl.send({"t": "notes_end", "nonce": offer["nonce"], "ok": True})
+        # Bo's FL saves its new notes by itself: it has version 2 now, nothing to share or open.
+        self.bo_fl.send({"t": "autosave", "content": 1, "pull": False})
+        snaps.save(self.written, touch(change_note(self.bo_content, 1, key), 3))
+        self.wait_for(lambda: self.bo.bridge.base == self.relay.snapshot["flp"], why="\n".join(self.bo.logs))
+        self.settle(0.3)
+        self.assertEqual(self.relay.version, 2)
+        self.assertEqual(len(self.bo.opened), opened)  # never reloaded
+        self.assertIsNone(self.bo.bridge.notes_live)
+
+    def test_notes_bo_changed_himself_come_with_the_version(self):
+        opened = self.start_bo()
+        snaps.save(self.project, touch(change_note(self.song, 1, first_note_key(self.song, 1) + 3), 2))
+        self.wait_for(lambda: self.relay.version == 2)
+        offer = self.offered()
+        self.fetch(offer, 0, ok=False, why="ändrade här")  # the script's `expect`: Bo changed them since
+        self.wait_for(lambda: len(self.bo.opened) == opened + 1)  # so the version is opened (or merged) as always
+        self.assertFalse(self.bo.bridge.notes_off)  # (nothing wrong with the way itself)
+
+    def test_more_than_notes_comes_with_the_version(self):
+        opened = self.start_bo()
+        snaps.save(self.project, touch(retitle(change_note(self.song, 1, first_note_key(self.song, 1) + 3),
+                                               "Annas titel"), 2))
+        self.wait_for(lambda: self.relay.version == 2)
+        self.wait_for(lambda: len(self.bo.opened) == opened + 1)
+        self.assertFalse(any(m.get("t") == "notes_in" for m in self.bo.sent))
+
+    def test_without_the_fetch_script_the_version_is_opened(self):
+        self.start(bo_status={"dirty": 0, "playing": False})
+        opened = len(self.bo.opened)
+        snaps.save(self.project, touch(change_note(self.song, 1, first_note_key(self.song, 1) + 3), 2))
+        self.wait_for(lambda: self.relay.version == 2)
+        self.wait_for(lambda: len(self.bo.opened) == opened + 1)
+        self.assertFalse(any(m.get("t") == "notes_in" for m in self.bo.sent))
+
+    def at_work(self):
+        self.bo.bridge.activity = lambda: (1.0, True)  # Bo is at work: the notes wait for a pause
+
+    def anna_moves_a_note(self, v, by=3):
+        snaps.save(self.project, touch(change_note(self.song, 1, first_note_key(self.song, 1) + by), v))
+        self.wait_for(lambda: self.relay.version == v)
+
+    def test_notes_for_a_project_fl_no_longer_has_are_dropped(self):
+        opened = self.start_bo()
+        self.at_work()
+        self.anna_moves_a_note(2)
+        self.wait_for(lambda: self.bo.bridge.notes_live is not None, why="\n".join(self.bo.logs))
+        other = self.old_file(os.path.join(self.tmp, "Bo", "Annat.flp"))
+        self.open(self.bo, self.bo_fl, other)  # Bo opens another song
+        self.wait_for(lambda: self.bo.bridge.notes_live is None)
+        self.bo.bridge.activity = lambda: (None, None)
+        self.settle(0.6)
+        self.assertFalse(any(m.get("t") == "notes_in" for m in self.bo.sent))  # never into that one
+        self.assertEqual(len(self.bo.opened), opened)  # nor is the session's opened over it
+
+    def test_a_while_without_a_pause_doesnt_turn_it_off(self):
+        opened = self.start_bo()
+        self.at_work()
+        self.anna_moves_a_note(2)
+        self.wait_for(lambda: self.bo.bridge.notes_live is not None)
+        self.bo.call(lambda: self.bo.bridge.notes_live.update(made=time.monotonic() - 1000))
+        self.wait_for(lambda: self.bo.bridge.notes_live is None)
+        self.assertFalse(self.bo.bridge.notes_off)
+        self.bo.bridge.activity = lambda: (None, None)
+        self.wait_for(lambda: len(self.bo.opened) == opened + 1)  # (that one is opened as always)
+        self.bo_fl.send({"t": "opened", "fp": self.bo_fl.fp})
+        self.anna_moves_a_note(3, by=5)
+        offer = self.offered()  # and the next one comes in the piano roll again
+        self.bo_fl.send({"t": "notes_end", "nonce": offer["nonce"], "ok": False, "why": "FL var upptaget"})
+        self.wait_for(lambda: self.bo.bridge.notes_live is None)
+        self.assertFalse(self.bo.bridge.notes_off)  # (Bo pressed play: nothing wrong with the way)
+
+    def test_a_newer_version_takes_the_place_of_notes_coming_in(self):
+        self.start_bo()
+        self.anna_moves_a_note(2)
+        first = self.offered()
+        self.bo_fl.send({"t": "notes_at", "nonce": first["nonce"], "i": 0})
+        self.wait_for(lambda: {"t": "notes_go", "nonce": first["nonce"], "i": 0} in self.bo.sent)
+        self.anna_moves_a_note(3, by=5)
+        self.wait_for(lambda: {"t": "notes_in", "cancel": True} in self.bo.sent)  # FL's script stops that one
+        self.wait_for(lambda: any(m.get("t") == "notes_in" and m.get("nonce") not in (None, first["nonce"])
+                                  for m in self.bo.sent), why="\n".join(self.bo.logs))
+
+    def test_turning_auto_sync_off_drops_the_notes(self):
+        self.start_bo()
+        self.at_work()
+        self.anna_moves_a_note(2)
+        self.wait_for(lambda: self.bo.bridge.notes_live is not None)
+        self.bo.call(self.bo.bridge.set_auto_sync, False)
+        self.assertIsNone(self.bo.bridge.notes_live)
+        self.bo.bridge.activity = lambda: (None, None)
+        self.settle(0.6)
+        self.assertFalse(any(m.get("t") == "notes_in" for m in self.bo.sent))
+
+    def test_the_piano_roll_fl_opened_is_the_one_while_it_fetches(self):
+        self.start_bo()
+        self.anna_moves_a_note(2)
+        offer = self.offered()
+        p, c = offer["items"][0][:2]
+        self.bo_fl.send({"t": "notes_at", "nonce": offer["nonce"], "i": 0})
+        self.wait_for(lambda: {"t": "notes_go", "nonce": offer["nonce"], "i": 0} in self.bo.sent)
+        self.bo_fl.send({"t": "pr", "p": p, "c": c + 1, "n": "Annan"})  # FL says another channel is selected
+        self.wait_for(lambda: self.bo.bridge.pr[:2] == (p, c + 1))
+        self.bo.call(self.bo.bridge._write_context)
+        with open(os.path.join(self.bo.bridge.notes_dir, "context.json"), encoding="utf-8") as f:
+            context = json.load(f)
+        self.assertEqual((context["pattern"], context["channel"]), (p, c))
+        self.assertEqual(context["auto"], {"nonce": "%s-0" % offer["nonce"]})
+
+    def test_fl_opening_another_project_meanwhile_opens_nothing(self):
+        opened = self.start_bo()
+        self.anna_moves_a_note(2)
+        offer = self.offered()
+        self.bo_fl.send({"t": "notes_end", "nonce": offer["nonce"], "ok": False, "why": "ett annat projekt"})
+        self.wait_for(lambda: self.bo.bridge.notes_live is None)
+        self.settle(0.6)
+        self.assertEqual(len(self.bo.opened), opened)
+        self.assertFalse(self.bo.bridge.notes_off)
+
+    def test_an_fl_that_couldnt_run_the_script_isnt_asked_again(self):
+        opened = self.start_bo()
+        snaps.save(self.project, touch(change_note(self.song, 1, first_note_key(self.song, 1) + 3), 2))
+        self.wait_for(lambda: self.relay.version == 2)
+        offer = self.offered()
+        self.bo_fl.send({"t": "notes_end", "nonce": offer["nonce"], "ok": False, "why": "menyn"})
+        self.wait_for(lambda: len(self.bo.opened) == opened + 1)
+        self.assertTrue(self.bo.bridge.notes_off)
 
 
 class AutoSyncTest(MergeSession):
@@ -1000,7 +1468,7 @@ class WhereFlSavesTest(snaps.Session):
         fl.send({"t": "st", "dirty": 0, "playing": False})  # FL tells when it saves (and loads)
         self.wait_for(lambda: link.bridge.watched == os.path.abspath(path))
         other = snaps.save(os.path.join(self.tmp, "Versioner", "Beat.flp"), snaps.make_project(title="ihop"))
-        link.call(lambda: setattr(link.bridge, "launched", (other, time.monotonic())))
+        link.call(lambda: setattr(link.bridge, "launched", (other, time.monotonic(), None)))
         self.settle(0.5)
         self.assertEqual(link.bridge.watched, os.path.abspath(path))  # nothing loaded yet
         fl.send({"t": "opened", "fp": snaps.FP_A})
@@ -1014,7 +1482,7 @@ class WhereFlSavesTest(snaps.Session):
         self.fl_saves(fl, path)
         self.wait_for(lambda: link.bridge.watched == os.path.abspath(path))
         other = snaps.save(os.path.join(self.tmp, "Versioner", "Beat.flp"), snaps.make_project(title="ihop"))
-        link.call(lambda: setattr(link.bridge, "launched", (other, time.monotonic())))
+        link.call(lambda: setattr(link.bridge, "launched", (other, time.monotonic(), None)))
         fl.send({"t": "opened", "fp": snaps.FP_A})  # FL (clean after its save) opens the merged version
         self.wait_for(lambda: link.bridge.watched == os.path.abspath(other), why="\n".join(link.logs))
 

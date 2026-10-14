@@ -84,6 +84,7 @@ import collections
 import dataclasses
 import itertools
 import ntpath
+import struct
 
 import flp
 
@@ -258,6 +259,53 @@ def channel_preset(project, n):
     data = (b"FLhd" + (6).to_bytes(4, "little") + PRESET_FORMAT.to_bytes(2, "little") + (1).to_bytes(2, "little")
             + p.ppq.to_bytes(2, "little") + b"FLdt" + len(body).to_bytes(4, "little") + body)
     return data, _channel_name(chunk)
+
+
+NOTE_BASE_FLAGS = 0x4000  # every note FL 26 writes has it
+NOTE_SLIDE = 0x0008
+NOTE_PORTA, NOTE_MUTED = 0x10, 0x20  # in the byte that holds the note's color (its MIDI channel)
+
+
+def pattern_notes(project, n):
+    """Pattern n's notes by channel, as FLSync's piano roll scripts write them:
+    {channel: sorted [time, length, key, velocity, pan, release, color, fcut,
+    fres, pitchofs, slide, porta, muted, repeats]}, from the 24-byte records of
+    its 224 (measured in FL 26.1.7: velocity, pan and release in 128ths, the
+    filter in 255ths, fine pitch around 120, porta and muted with the color,
+    slide in the flags, the repeats in byte 15). None when the project can't
+    be read or a note holds more than the scripts can give (other flags, a group)."""
+    try:
+        p = _Project("theirs", project, None)
+    except MergeRefused:
+        return None
+    out = {}
+    chunk = p.get(("notes", n))
+    if chunk is None:
+        return out
+    for i in range(chunk.lo, chunk.hi):
+        if p.events[i][0] != NOTES:
+            continue
+        records = _records(p.value(i), NOTE_SIZE)
+        if records is None:
+            return None
+        for record in records:
+            (start, flags, channel, length, key, group, fine, repeats, release, color, pan, velocity, fcut,
+             fres) = struct.unpack_from("<IHHIHHBBBBBBBB", record)
+            if flags & ~(NOTE_BASE_FLAGS | NOTE_SLIDE) or group or fine > 240:
+                return None
+            out.setdefault(channel, []).append(
+                [start, length, key, velocity / 128, pan / 128, release / 128, color & 15, fcut / 255, fres / 255,
+                 fine - 120, int(bool(flags & NOTE_SLIDE)), int(bool(color & NOTE_PORTA)),
+                 int(bool(color & NOTE_MUTED)), repeats])
+    for rows in out.values():
+        rows.sort()
+    return out
+
+
+def channel_label(project, n):
+    """The name FL shows for channel n of `project` (None if there's no such channel)."""
+    chunk = _Project("theirs", project, None).get(("channel", n))
+    return None if chunk is None else _channel_name(chunk)
 
 
 def channel_samples(project, n):

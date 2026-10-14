@@ -111,13 +111,16 @@ class BridgeLink:
             "fl_open": lambda: getattr(fl, "window_open", False),  # FL's window: closed unless a test opens it
             "cache_dir": os.path.join(self.folder, "cache"),
             "projects_dir": os.path.join(self.folder, "Projects", "FLSync"),
-            "notes_dir": os.path.join(self.folder, "notes"),
+            "notes_dir": os.path.join(self.folder, "Image-Line", "FL Studio", "Settings", "Piano roll scripts",
+                                      "FLSync"),  # (where FL's piano roll scripts look: bridge.piano_roll_scripts)
             "plugin_db": os.path.join(self.folder, "Plugin database", "Installed"),
             "fl_dirs": {"factory_dir": os.path.join(self.folder, "FL Studio 2025"),
                         "user_dir": os.path.join(self.folder, "Image-Line"),
                         "downloads_dir": os.path.join(self.folder, "Image-Line", "Downloads"),
                         "home_dir": os.path.join(self.folder, "home")},
             "opener": self.opened.append,
+            "activity": lambda: (None, None),  # never the real computer's keyboard and mouse ...
+            "pauses": (0.0, 0.0),              # ... nor a wait for the sharer to pause (tests of it set their own)
         }
         timing = {key: options.pop(key) for key in list(options) if key in FAST}
         self.places.update(options)
